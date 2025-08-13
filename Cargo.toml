@@ -1,0 +1,14 @@
+[package]
+name = "winit-ohos"
+version = "0.30.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ohos-rs/winit-ohos.git"
+
+
+[dependencies]
+winit-core = { git = "https://github.com/rust-windowing/winit", branch = "master" }
+
+
+openharmony-ability = { version = "0.2" }
+openharmony-ability-derive = { version = "0.2" }
