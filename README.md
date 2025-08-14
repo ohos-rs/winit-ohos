@@ -1,6 +1,6 @@
 # winit-ohos
 
-Winit backend for OpenHarmony.
+Winit's OpenHarmony backend.
 
 
 ## LICENSE

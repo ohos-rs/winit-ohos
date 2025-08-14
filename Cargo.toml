@@ -1,13 +1,17 @@
 [package]
 name = "winit-ohos"
-version = "0.30.0"
+version = "0.30.0-beta.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ohos-rs/winit-ohos.git"
+description = "Winit's OpenHarmony backend"
 
 
 [dependencies]
-winit-core = { git = "https://github.com/rust-windowing/winit", branch = "master" }
+winit-core = { git = "https://github.com/richerfu/winit", branch = "master" }
+tracing = { version = "0.1.40", default-features = false }
+dpi = { git = "https://github.com/richerfu/winit", branch = "master" }
+rwh_06 = { package = "raw-window-handle", version = "0.6", features = ["std"] }
 
 
 openharmony-ability = { version = "0.2" }
