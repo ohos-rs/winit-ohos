@@ -13,6 +13,7 @@
 
 mod event_loop;
 mod keycodes;
+pub mod plugins;
 
 use winit_core::event_loop::ActiveEventLoop as CoreActiveEventLoop;
 use winit_core::window::Window as CoreWindow;
@@ -37,27 +38,51 @@ pub trait ActiveEventLoopExtOpenHarmony {
 
 impl ActiveEventLoopExtOpenHarmony for dyn CoreActiveEventLoop + '_ {
     fn openharmony_app(&self) -> &OpenHarmonyApp {
-        let event_loop = self.cast_ref::<ActiveEventLoop>().unwrap();
+        let event_loop = self
+            .cast_ref::<ActiveEventLoop>()
+            .expect("ActiveEventLoop is not backed by winit-ohos");
         &event_loop.app
     }
 }
 
 /// Additional methods on [`Window`] that are specific to OpenHarmony.
 pub trait WindowExtOpenHarmony {
+    /// Get the Ability handle that owns this window.
+    ///
+    /// This can be used with the optional `plugins::window` facade or plugins owned by the app.
+    fn openharmony_app(&self) -> &OpenHarmonyApp;
+
     fn content_rect(&self) -> Rect;
 
     fn config(&self) -> Configuration;
 }
 
 impl WindowExtOpenHarmony for dyn CoreWindow + '_ {
+    fn openharmony_app(&self) -> &OpenHarmonyApp {
+        let window = self
+            .cast_ref::<Window>()
+            .expect("Window is not backed by winit-ohos");
+        window.openharmony_app()
+    }
+
     fn content_rect(&self) -> Rect {
-        let window = self.cast_ref::<Window>().unwrap();
+        let window = self
+            .cast_ref::<Window>()
+            .expect("Window is not backed by winit-ohos");
         window.content_rect()
     }
 
     fn config(&self) -> Configuration {
-        let window = self.cast_ref::<Window>().unwrap();
+        let window = self
+            .cast_ref::<Window>()
+            .expect("Window is not backed by winit-ohos");
         window.config()
+    }
+}
+
+impl EventLoopExtOpenHarmony for EventLoop {
+    fn openharmony_app(&self) -> &OpenHarmonyApp {
+        &self.openharmony_app
     }
 }
 
@@ -70,19 +95,14 @@ pub trait EventLoopBuilderExtOpenHarmony {
 
 /// Re-export of the `openharmony-ability` API
 ///
-/// Winit re-exports the `openharmony-ability` API for convenience so that most
-/// applications can rely on the Winit crate to resolve the required version of
-/// `openharmony-ability` and avoid any chance of a conflict between Winit and the
-/// application crate.
+/// Winit re-exports the `openharmony-ability` API for convenient, version-aligned imports. Native
+/// module crates must still include the standard direct Ability and N-API dependencies required by
+/// the `#[ability]` macro expansion.
 ///
 ///
-/// For compatibility applications should then import the [`OpenHarmonyApp`] type for
-/// their `init(app: OpenHarmonyApp)` function and use `openharmony-ability-derive` to
-/// implement entry like:
+/// Applications can import both the Ability handle and derive macro from this module:
 /// ```rust
-/// #[cfg(target_env = "ohos")]
-/// use winit::platform::ohos::ability::OpenHarmonyApp;
-/// use openharmony_ability_derive::ability;
+/// use winit_ohos::ability::{ability, OpenHarmonyApp};
 ///
 /// #[ability]
 /// fn init(app: OpenHarmonyApp) {

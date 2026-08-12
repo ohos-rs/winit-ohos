@@ -155,7 +155,7 @@ pub fn to_physical_key(keycode: Keycode) -> PhysicalKey {
         Keycode::Sleep => KeyCode::Sleep, // what about SoftSleep?
         Keycode::Wakeup => KeyCode::WakeUp,
 
-        keycode => return PhysicalKey::Unidentified(NativeKeyCode::Android(keycode.into())),
+        keycode => return PhysicalKey::Unidentified(NativeKeyCode::Ohos(keycode.into())),
     })
 }
 
@@ -487,7 +487,7 @@ pub fn to_logical(keycode: Keycode) -> Key {
         // ThumbsDown => Key::Unidentified(native),
         // ProfileSwitch => Key::Unidentified(native),
 
-        // It's always possible that new versions of Android could introduce
+        // It's always possible that new versions of OpenHarmony could introduce
         // key codes we can't know about at compile time.
         _ => Key::Unidentified(native),
     }
@@ -530,5 +530,18 @@ pub fn to_location(keycode: Keycode) -> KeyLocation {
         NumpadRightParen => KeyLocation::Numpad,
 
         _ => KeyLocation::Standard,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unidentified_physical_keys_keep_the_ohos_native_code() {
+        assert_eq!(
+            to_physical_key(Keycode::Fn),
+            PhysicalKey::Unidentified(NativeKeyCode::Ohos(Keycode::Fn.into()))
+        );
     }
 }
