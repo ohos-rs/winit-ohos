@@ -17,6 +17,6 @@ tracing = { version = "0.1.40", default-features = false }
 dpi = { version = "=0.1.2", git = "https://github.com/richerfu/winit.git", branch = "master" }
 rwh_06 = { package = "raw-window-handle", version = "0.6", features = ["std"] }
 
-openharmony-ability = { version = "1.0.0-beta.1" }
+openharmony-ability = { version = "1.0.0-beta.2" }
 openharmony-ability-derive = { version = "1.0.0-beta.1" }
 openharmony-ability-plugin-window = { version = "1.0.0-beta.1", optional = true }
