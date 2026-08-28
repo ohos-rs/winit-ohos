@@ -21,7 +21,7 @@ the `#[ability]` macro expansion:
 [dependencies]
 napi-ohos = "1.2"
 napi-derive-ohos = "1.2"
-openharmony-ability = "1.0.0-beta.1"
+openharmony-ability = "1.0.0-beta.2"
 winit = { git = "https://github.com/richerfu/winit.git", branch = "master" }
 
 [build-dependencies]
@@ -72,8 +72,9 @@ fn openharmony_app(app: OpenHarmonyApp) {
 ```
 
 The backend translates Ability 1.0 lifecycle, surface, content-rect, avoid-area, configuration,
-touch, mouse, key and IME callbacks into current `winit-core` events. The loop remains driven by
-OHOS: `RedrawRequested` is emitted only for the system's `WindowRedraw` callback, and
+raw XComponent touch/mouse/key input, ArkUI axis and gesture input, and IME callbacks into current
+`winit-core` events. The loop remains driven by OHOS: `RedrawRequested` is emitted only for the
+system's `WindowRedraw` callback, and
 `Window::request_redraw` cannot actively schedule a frame. `EventLoopProxy::wake_up` asks Ability
 to queue a task; `proxy_wake_up` is delivered only after OHOS executes that task on its main
 thread. Likewise, `ControlFlow` affects the `StartCause` of the next system callback but cannot

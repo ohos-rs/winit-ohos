@@ -13,8 +13,9 @@ use openharmony_ability::xcomponent::{
 use tracing::{trace, warn};
 
 use openharmony_ability::{
-    AvoidAreaType, ColorMode, Configuration, Event as MainEvent, ImeEvent, InputEvent,
-    OpenHarmonyApp, Rect, ime::KeyboardStatus,
+    ArkUiInputEvent, AvoidAreaType, ColorMode, Configuration, Event as MainEvent, GestureEvent,
+    GesturePhase as OhosGesturePhase, ImeEvent, InputEvent, OpenHarmonyApp, Rect,
+    XComponentInputEvent, arkui::arkui_input_binding::UIInputAction, ime::KeyboardStatus,
 };
 
 use dpi::{PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
@@ -23,7 +24,7 @@ use winit_core::cursor::{Cursor, CustomCursor, CustomCursorSource};
 use winit_core::error::{EventLoopError, NotSupportedError, OsError, RequestError};
 use winit_core::event::{
     self, ButtonSource, DeviceId, ElementState, FingerId, Force, Ime, Modifiers, MouseButton,
-    PointerKind, PointerSource, StartCause, SurfaceSizeWriter,
+    MouseScrollDelta, PointerKind, PointerSource, StartCause, SurfaceSizeWriter, TouchPhase,
 };
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::register::EventLoopExtRegister;
@@ -160,28 +161,35 @@ impl EventLoop {
 
     fn handle_input_event<A: ApplicationHandler>(&mut self, event: &InputEvent, app: &mut A) {
         match event {
-            InputEvent::TouchEvent(motion_event) => self.handle_touch_event(motion_event, app),
-            InputEvent::MouseEvent(mouse_event) => self.handle_mouse_event(mouse_event, app),
-            InputEvent::KeyEvent(key) => match key.action {
-                Action::Down => self.emit_key_event(
-                    key.code,
-                    ElementState::Pressed,
-                    Some(DeviceId::from_raw(key.device_id)),
-                    false,
-                    false,
-                    app,
-                ),
-                Action::Up => self.emit_key_event(
-                    key.code,
-                    ElementState::Released,
-                    Some(DeviceId::from_raw(key.device_id)),
-                    false,
-                    false,
-                    app,
-                ),
-                Action::Unknown => trace!("Ignoring an OHOS key event with unknown action"),
+            InputEvent::XComponent(event) => match event {
+                XComponentInputEvent::Touch(motion_event) => {
+                    self.handle_touch_event(motion_event, app);
+                }
+                XComponentInputEvent::Mouse(mouse_event) => {
+                    self.handle_mouse_event(mouse_event, app);
+                }
+                XComponentInputEvent::Key(key) => match key.action {
+                    Action::Down => self.emit_key_event(
+                        key.code,
+                        ElementState::Pressed,
+                        Some(DeviceId::from_raw(key.device_id)),
+                        false,
+                        false,
+                        app,
+                    ),
+                    Action::Up => self.emit_key_event(
+                        key.code,
+                        ElementState::Released,
+                        Some(DeviceId::from_raw(key.device_id)),
+                        false,
+                        false,
+                        app,
+                    ),
+                    Action::Unknown => trace!("Ignoring an OHOS key event with unknown action"),
+                },
             },
-            InputEvent::ImeEvent(data) => match data {
+            InputEvent::ArkUi(event) => self.handle_arkui_input_event(event, app),
+            InputEvent::Ime(data) => match data {
                 ImeEvent::TextInputEvent(s) => {
                     app.window_event(
                         &self.window_target,
@@ -211,6 +219,62 @@ impl EventLoop {
                     KeyboardStatus::None => trace!("Ignoring an empty OHOS IME status event"),
                 },
             },
+        }
+    }
+
+    fn handle_arkui_input_event<A: ApplicationHandler>(
+        &mut self,
+        event: &ArkUiInputEvent,
+        app: &mut A,
+    ) {
+        match event {
+            ArkUiInputEvent::Axis(event) => app.window_event(
+                &self.window_target,
+                GLOBAL_WINDOW,
+                event::WindowEvent::MouseWheel {
+                    device_id: None,
+                    delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+                        event.delta_x,
+                        event.delta_y,
+                    )),
+                    phase: touch_phase_from_arkui(event.pointer.action),
+                },
+            ),
+            ArkUiInputEvent::Gesture(GestureEvent::Tap(event)) => {
+                let finger_id = event.pointer.pointer_id.unwrap_or(0);
+                self.emit_touch_point(
+                    TouchEvent::Down,
+                    finger_id,
+                    event.pointer.x,
+                    event.pointer.y,
+                    0.0,
+                    0,
+                    app,
+                );
+                self.emit_touch_point(
+                    TouchEvent::Up,
+                    finger_id,
+                    event.pointer.x,
+                    event.pointer.y,
+                    0.0,
+                    0,
+                    app,
+                );
+            }
+            ArkUiInputEvent::Gesture(GestureEvent::Pan(event)) => app.window_event(
+                &self.window_target,
+                GLOBAL_WINDOW,
+                event::WindowEvent::PanGesture {
+                    device_id: None,
+                    delta: PhysicalPosition::new(event.delta_x, event.delta_y),
+                    phase: touch_phase_from_gesture(event.phase),
+                },
+            ),
+            ArkUiInputEvent::Gesture(GestureEvent::Swipe(_)) => {
+                // Winit has no swipe event. Ability emits the pan stream for the same gesture,
+                // which preserves its motion without inventing a second synthetic event.
+                trace!("Ignoring an OHOS swipe event after its pan stream");
+            }
         }
     }
 
@@ -1310,6 +1374,24 @@ fn normalized_force(force: f32) -> f64 {
     }
 }
 
+fn touch_phase_from_arkui(action: UIInputAction) -> TouchPhase {
+    match action {
+        UIInputAction::Down => TouchPhase::Started,
+        UIInputAction::Move => TouchPhase::Moved,
+        UIInputAction::Up => TouchPhase::Ended,
+        UIInputAction::Cancel => TouchPhase::Cancelled,
+    }
+}
+
+fn touch_phase_from_gesture(phase: OhosGesturePhase) -> TouchPhase {
+    match phase {
+        OhosGesturePhase::Start => TouchPhase::Started,
+        OhosGesturePhase::Update => TouchPhase::Moved,
+        OhosGesturePhase::End => TouchPhase::Ended,
+        OhosGesturePhase::Cancel => TouchPhase::Cancelled,
+    }
+}
+
 fn nonnegative_u32(value: i32) -> u32 {
     u32::try_from(value).unwrap_or(0)
 }
@@ -1401,6 +1483,43 @@ mod tests {
         assert_eq!(normalized_force(f32::NAN), 0.0);
         assert_eq!(normalized_force(-1.0), 0.0);
         assert_eq!(normalized_force(2.0), 1.0);
+    }
+
+    #[test]
+    fn arkui_input_phases_map_to_winit_phases() {
+        assert_eq!(
+            touch_phase_from_arkui(UIInputAction::Down),
+            TouchPhase::Started
+        );
+        assert_eq!(
+            touch_phase_from_arkui(UIInputAction::Move),
+            TouchPhase::Moved
+        );
+        assert_eq!(touch_phase_from_arkui(UIInputAction::Up), TouchPhase::Ended);
+        assert_eq!(
+            touch_phase_from_arkui(UIInputAction::Cancel),
+            TouchPhase::Cancelled
+        );
+    }
+
+    #[test]
+    fn arkui_gesture_phases_map_to_winit_phases() {
+        assert_eq!(
+            touch_phase_from_gesture(OhosGesturePhase::Start),
+            TouchPhase::Started
+        );
+        assert_eq!(
+            touch_phase_from_gesture(OhosGesturePhase::Update),
+            TouchPhase::Moved
+        );
+        assert_eq!(
+            touch_phase_from_gesture(OhosGesturePhase::End),
+            TouchPhase::Ended
+        );
+        assert_eq!(
+            touch_phase_from_gesture(OhosGesturePhase::Cancel),
+            TouchPhase::Cancelled
+        );
     }
 
     #[test]
