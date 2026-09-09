@@ -4,10 +4,9 @@ Winit's OpenHarmony backend, driven by `openharmony-ability` lifecycle callbacks
 
 ## Dependency policy
 
-This crate intentionally tracks the OHOS-enabled Winit `master` branch instead of a released Winit
-version. The current Ability/N-API toolchain requires Rust 1.88. `Cargo.lock` pins the exact branch
-commit that was compiled and tested. Run
-`cargo update -p winit-core -p dpi` when intentionally moving to a newer Winit commit.
+This crate tracks the matching released `winit-core` beta from crates.io. The current Ability/N-API
+toolchain requires Rust 1.88. `Cargo.lock` pins the exact registry packages that were compiled and
+tested. Run `cargo update -p winit-core -p dpi` when intentionally moving to newer releases.
 
 `openharmony-ability` and its derive crate are regular dependencies because this repository is an
 OHOS-only backend; they are not hidden behind a `target_env = "ohos"` dependency table.

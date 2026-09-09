@@ -79,7 +79,8 @@ dependencies = [
 [[package]]
 name = "dpi"
 version = "0.1.2"
-source = "git+https://github.com/richerfu/winit.git?branch=master#f5e20bd7da25934f39abe8dc44a0597110ef6357"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "form_urlencoded"
@@ -884,8 +885,9 @@ checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 
 [[package]]
 name = "winit-core"
-version = "0.31.0-beta.2"
-source = "git+https://github.com/richerfu/winit.git?branch=master#f5e20bd7da25934f39abe8dc44a0597110ef6357"
+version = "0.31.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8af6307236c51847199950c15cf80e0481a250bb96ce9132f5026df4ad3d0f9"
 dependencies = [
  "bitflags",
  "cursor-icon",
@@ -899,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "winit-ohos"
-version = "0.31.0-beta.2"
+version = "0.31.0-beta.3"
 dependencies = [
  "dpi",
  "openharmony-ability",

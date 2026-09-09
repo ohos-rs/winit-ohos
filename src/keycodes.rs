@@ -155,14 +155,14 @@ pub fn to_physical_key(keycode: Keycode) -> PhysicalKey {
         Keycode::Sleep => KeyCode::Sleep, // what about SoftSleep?
         Keycode::Wakeup => KeyCode::WakeUp,
 
-        keycode => return PhysicalKey::Unidentified(NativeKeyCode::Ohos(keycode.into())),
+        _ => return PhysicalKey::Unidentified(NativeKeyCode::Unidentified),
     })
 }
 
 pub fn to_logical(keycode: Keycode) -> Key {
     use openharmony_ability::xcomponent::KeyCode::*;
 
-    let native = NativeKey::Ohos(u32::from(keycode));
+    let native = NativeKey::Unidentified;
 
     match keycode {
         // Using `BrowserHome` instead of `GoHome` according to
@@ -538,10 +538,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unidentified_physical_keys_keep_the_ohos_native_code() {
+    fn unidentified_physical_keys_use_the_portable_fallback() {
         assert_eq!(
             to_physical_key(Keycode::Fn),
-            PhysicalKey::Unidentified(NativeKeyCode::Ohos(Keycode::Fn.into()))
+            PhysicalKey::Unidentified(NativeKeyCode::Unidentified)
         );
     }
 }
