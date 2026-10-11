@@ -4,9 +4,11 @@ Winit's OpenHarmony backend, driven by `openharmony-ability` lifecycle callbacks
 
 ## Dependency policy
 
-This crate tracks the matching released `winit-core` beta from crates.io. The current Ability/N-API
-toolchain requires Rust 1.88. `Cargo.lock` pins the exact registry packages that were compiled and
-tested. Run `cargo update -p winit-core -p dpi` when intentionally moving to newer releases.
+This branch pins `winit-core` and `dpi` to the same richerfu/winit 0.31 beta revision.
+Ability and all plugin crates use one matching richerfu/openharmony-ability revision,
+which in turn pins the native bindings containing the drag-result and pen-tilt APIs.
+The current Ability/N-API toolchain requires Rust 1.88. Keep these revisions aligned
+when updating the dependency graph; `Cargo.lock` records the tested resolution.
 
 `openharmony-ability` and its derive crate are regular dependencies because this repository is an
 OHOS-only backend; they are not hidden behind a `target_env = "ohos"` dependency table.
@@ -20,8 +22,8 @@ the `#[ability]` macro expansion:
 [dependencies]
 napi-ohos = "1.2"
 napi-derive-ohos = "1.2"
-openharmony-ability = "1.0.0-beta.2"
-winit = { git = "https://github.com/richerfu/winit.git", branch = "master" }
+openharmony-ability = { git = "https://github.com/richerfu/openharmony-ability.git", rev = "d8cf549505fca3ea39d4a56cb58334a85a6d1dc6" }
+winit = { git = "https://github.com/richerfu/winit.git", rev = "c9ee2bff8a79aacb8068546e7150197693d35a5a" }
 
 [build-dependencies]
 napi-build-ohos = "1.2"
@@ -70,49 +72,45 @@ fn openharmony_app(app: OpenHarmonyApp) {
 }
 ```
 
-The backend translates Ability 1.0 lifecycle, surface, content-rect, avoid-area, configuration,
-raw XComponent touch/mouse/key input, ArkUI axis and gesture input, and IME callbacks into current
-`winit-core` events. The loop remains driven by OHOS: `RedrawRequested` is emitted only for the
-system's `WindowRedraw` callback, and
-`Window::request_redraw` cannot actively schedule a frame. `EventLoopProxy::wake_up` asks Ability
-to queue a task; `proxy_wake_up` is delivered only after OHOS executes that task on its main
-thread. Likewise, `ControlFlow` affects the `StartCause` of the next system callback but cannot
-independently start polling or a deadline timer. `run_app_on_demand` and `pump_app_events` are
-intentionally not supported because the Ability lifecycle owns the main loop.
+The backend translates Ability lifecycle, surface geometry, safe areas, configuration,
+XComponent touch/mouse/key input, ArkUI axis/gesture input and IME callbacks into
+winit events. `run_app` registers callbacks and returns to the Ability main loop.
+`request_redraw` and `EventLoopProxy::wake_up` queue Ability main-thread work;
+`ControlFlow` determines the next callback's `StartCause`. The platform owns the
+loop, so `run_app_on_demand` and `pump_app_events` are unsupported.
 
-## Ability window plugin
+## Platform capabilities
 
-Only the window capability is integrated because it belongs to this backend's domain. The
-`plugin-window` feature is disabled by default; application-level plugins such as files,
-permissions, resources, URLs, webviews and app control remain the application's responsibility.
-Enable the window facade explicitly when needed:
+Use the pinned Ability and winit revisions together with the matching ArkTS HARs.
+`EventLoop` idempotently registers the window, clipboard, URL, files, app-control
+and permission facades. `extended-plugins` also registers menus, notifications,
+process control, system state and accessibility state. The matching ArkTS factories
+must be installed in `NativeAbility.bridgePlugins`. Build those HARs from the same
+Ability commit as the Rust dependencies.
+
+Window mutations run asynchronously in per-window order. Native children wait for
+surface readiness before their queued configuration runs. Clipboard reads and file
+pickers also run asynchronously; never block the Ability UI thread waiting for a
+bridge future. Use `task::spawn` and request a repaint when a result arrives.
+`events::subscribe` delivers Want, menu, system-state and screen-reader events.
+The `file_access` module persists and activates picker grants before Rust filesystem
+access. Native file drags support Copy/Move, owned RGBA previews and actual OS completion
+results, retaining their source/data until completion. Pen pressure, tilt, twist
+and eraser metadata are forwarded as tablet-tool events. Static custom cursors
+and API 22+ 2in1 Ability window icons use typed window-plugin requests.
+
+Applications select this backend through a workspace-root patch while these changes
+are unpublished:
 
 ```toml
-[dependencies]
-winit = { git = "https://github.com/richerfu/winit.git", branch = "master", features = ["ohos-window-plugin"] }
+[patch.crates-io]
+winit-ohos = { path = "/path/to/winit-ohos" }
 ```
 
-Constructing `EventLoop` automatically and idempotently registers the enabled Rust facade. It also
-requires the matching `@ohos-rs/ability-plugin-window` ArkTS HAR and factory in
-`NativeAbility::bridgePlugins`; enabling only the Cargo feature is not sufficient:
-
-```ts
-import { LazyPlugin, NativeAbility } from "@ohos-rs/ability";
-import { WindowPlugin } from "@ohos-rs/ability-plugin-window";
-
-export default class EntryAbility extends NativeAbility {
-  public moduleName: string = "my_native_module";
-  public bridgePlugins = [
-    new LazyPlugin(() => new WindowPlugin()),
-  ];
-}
-```
-
-The window plugin is exposed as an asynchronous capability facade for avoid-area queries and OS
-sub-window operations. It is not used to fake synchronous Winit window setters. Access the same
-`OpenHarmonyApp` through `EventLoopExtOpenHarmony`, `ActiveEventLoopExtOpenHarmony`, or
-`WindowExtOpenHarmony`, then use `plugins::window`'s extension trait. Other Ability plugins should
-be declared and registered directly by the application.
+Run `cargo check --all-targets --all-features --target aarch64-unknown-linux-ohos`
+and the matching Clippy command with `OHOS_NDK_HOME` pointing to the OpenHarmony SDK.
+Cross-compilation checks do not replace device tests for pen metadata, drag completion
+and accessibility services.
 
 ## License
 

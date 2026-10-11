@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,14 +14,18 @@ use tracing::{trace, warn};
 
 use openharmony_ability::{
     ArkUiInputEvent, AvoidAreaType, ColorMode, Configuration, Event as MainEvent, GestureEvent,
-    GesturePhase as OhosGesturePhase, ImeEvent, InputEvent, OpenHarmonyApp, Rect,
-    XComponentInputEvent, arkui::arkui_input_binding::UIInputAction, ime::KeyboardStatus,
+    GesturePhase as OhosGesturePhase, ImeEvent, InputEvent, KeyboardEventData,
+    KeyboardInputDelivery, OpenHarmonyApp, Rect, XComponentInputEvent,
+    arkui::arkui_input_binding::{UIInputAction, UIInputEvent, UIInputSourceType, UIInputToolType},
+    ime::KeyboardStatus,
 };
 
 use dpi::{PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{Cursor, CustomCursor, CustomCursorSource};
-use winit_core::error::{EventLoopError, NotSupportedError, OsError, RequestError};
+use winit_core::error::{
+    CreateWindowError, CustomCursorError, EventLoopError, NotSupportedError, OsError, RequestError,
+};
 use winit_core::event::{
     self, ButtonSource, DeviceId, ElementState, FingerId, Force, Ime, Modifiers, MouseButton,
     MouseScrollDelta, PointerKind, PointerSource, StartCause, SurfaceSizeWriter, TouchPhase,
@@ -53,17 +57,36 @@ pub struct EventLoop {
     loop_running: bool,
     surface_available: bool,
     resumed: bool,
+    current_window: WindowId,
+    input: InputState,
+    input_states: HashMap<WindowId, InputState>,
+    wait_started: Instant,
+}
+
+#[derive(Debug, Default)]
+struct InputState {
     primary_pointer: Option<FingerId>,
     pressed_fingers: HashSet<i32>,
+    pending_touch: Option<TouchEventData>,
+    pen_metadata: Option<openharmony_ability::StylusInputData>,
     mouse_inside: bool,
     modifiers: ModifiersState,
     modifier_keys: ModifiersKeys,
-    wait_started: Instant,
 }
 
 #[derive(Debug)]
 struct SharedWindowState {
+    commands: crate::task::CommandQueue,
+    ready: Mutex<Option<futures_channel::oneshot::Sender<()>>>,
     inner: Mutex<WindowState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowDrag {
+    direction: Option<ResizeDirection>,
+    pointer: PhysicalPosition<f64>,
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
 }
 
 #[derive(Debug)]
@@ -77,16 +100,48 @@ struct WindowState {
     visible: bool,
     theme: Option<Theme>,
     ime_capabilities: Option<ImeCapabilities>,
+    title: String,
+    resizable: bool,
+    decorations: bool,
+    enabled_buttons: WindowButtons,
+    minimized: bool,
+    maximized: bool,
+    fullscreen: Option<Fullscreen>,
+    min_size: Option<PhysicalSize<u32>>,
+    max_size: Option<PhysicalSize<u32>>,
+    real_window_id: Option<i32>,
+    initial_attributes: Option<WindowAttributes>,
+    redraw_pending: bool,
+    pointer_position: PhysicalPosition<f64>,
+    dragging: Option<WindowDrag>,
+    resize_increments: Option<PhysicalSize<u32>>,
+    ime_edits: Vec<crate::ImeEdit>,
 }
 
 impl SharedWindowState {
-    fn new(app: &OpenHarmonyApp) -> Self {
-        let content_rect = app.content_rect();
-        let window_rect = app.window_rect();
+    fn new(app: &OpenHarmonyApp, id: i64) -> Self {
+        let content_rect = app.content_rect_for(id);
+        let window_rect = app.window_rect_for(id);
         let surface_size = physical_size(content_rect.width, content_rect.height);
         let outer_size = physical_size(window_rect.width, window_rect.height);
 
+        let commands = crate::task::CommandQueue::default();
+        let ready = if id == 0 {
+            None
+        } else {
+            let (ready, wait) = futures_channel::oneshot::channel();
+            // Eframe may issue size/position requests as soon as create_window returns.
+            // Float window creation is asynchronous; queue those requests until its
+            // XComponent exists and WindowManager has registered the logical ID.
+            commands.push(async move {
+                let _ = wait.await;
+            });
+            Some(ready)
+        };
+
         Self {
+            commands,
+            ready: Mutex::new(ready),
             inner: Mutex::new(WindowState {
                 surface_size,
                 surface_position: PhysicalPosition::new(content_rect.left, content_rect.top),
@@ -98,6 +153,22 @@ impl SharedWindowState {
                 visible: false,
                 theme: theme(app.config().color_mode),
                 ime_capabilities: None,
+                title: String::new(),
+                resizable: true,
+                decorations: true,
+                enabled_buttons: WindowButtons::all(),
+                minimized: false,
+                maximized: false,
+                fullscreen: None,
+                min_size: None,
+                max_size: None,
+                real_window_id: None,
+                initial_attributes: None,
+                redraw_pending: false,
+                pointer_position: PhysicalPosition::default(),
+                dragging: None,
+                resize_increments: None,
+                ime_edits: Vec::new(),
             }),
         }
     }
@@ -119,6 +190,14 @@ impl EventLoop {
              OpenHarmony or HarmonyNext",
         );
 
+        // ArkUI's post-IME stream provides the system-translated character and
+        // held modifiers; raw XComponent key codes lose Shift and keyboard layouts.
+        if let Err(error) =
+            openharmony_app.set_keyboard_input_delivery(KeyboardInputDelivery::ArkUi)
+        {
+            warn!("ArkUI keyboard input unavailable; using raw key codes: {error}");
+        }
+
         crate::plugins::register_enabled(openharmony_app).map_err(|error| {
             EventLoopError::Os(OsError::new(
                 line!(),
@@ -132,7 +211,7 @@ impl EventLoop {
         }
 
         let event_loop_proxy = Arc::new(EventLoopProxy::new(openharmony_app.clone()));
-        let shared = Arc::new(SharedWindowState::new(openharmony_app));
+        let shared = Arc::new(SharedWindowState::new(openharmony_app, 0));
 
         Ok(Self {
             openharmony_app: openharmony_app.clone(),
@@ -141,16 +220,17 @@ impl EventLoop {
                 control_flow: Cell::new(ControlFlow::default()),
                 exit: Cell::new(false),
                 event_loop_proxy,
+                drag_drop: Default::default(),
+                windows: Mutex::new(HashMap::from([(GLOBAL_WINDOW, shared.clone())])),
+                root_claimed: Arc::new(AtomicBool::new(false)),
                 shared,
             },
             loop_running: false,
             surface_available: false,
             resumed: false,
-            primary_pointer: None,
-            pressed_fingers: HashSet::new(),
-            mouse_inside: false,
-            modifiers: ModifiersState::empty(),
-            modifier_keys: ModifiersKeys::empty(),
+            current_window: GLOBAL_WINDOW,
+            input: InputState::default(),
+            input_states: HashMap::new(),
             wait_started: Instant::now(),
         })
     }
@@ -160,13 +240,50 @@ impl EventLoop {
     }
 
     fn handle_input_event<A: ApplicationHandler>(&mut self, event: &InputEvent, app: &mut A) {
+        if let Some(touch) = self.input.pending_touch.take() {
+            // ArkUI reports mouse presses through both native touch and mouse callbacks.
+            // Ability follows each native touch with metadata identifying its source.
+            let mouse_emulated_touch = matches!(event,
+                InputEvent::ArkUi(ArkUiInputEvent::Pointer(pointer))
+                    if pointer.event_type == UIInputEvent::Touch
+                        && pointer.timestamp == touch.timestamp
+                        && pointer.source_type == UIInputSourceType::Mouse
+            );
+            self.input.pen_metadata = match event {
+                InputEvent::ArkUi(ArkUiInputEvent::Pointer(pointer))
+                    if pointer.timestamp == touch.timestamp =>
+                {
+                    pointer.stylus
+                }
+                _ => None,
+            };
+            if !mouse_emulated_touch {
+                self.handle_touch_event(&touch, app);
+            }
+            self.input.pen_metadata = None;
+        }
         match event {
             InputEvent::XComponent(event) => match event {
                 XComponentInputEvent::Touch(motion_event) => {
-                    self.handle_touch_event(motion_event, app);
+                    self.input.pending_touch = Some(motion_event.clone());
                 }
                 XComponentInputEvent::Mouse(mouse_event) => {
                     self.handle_mouse_event(mouse_event, app);
+                }
+                XComponentInputEvent::Hover(hovered) => {
+                    if !hovered && self.input.mouse_inside {
+                        self.input.mouse_inside = false;
+                        app.window_event(
+                            &self.window_target,
+                            self.current_window,
+                            event::WindowEvent::PointerLeft {
+                                device_id: None,
+                                primary: true,
+                                position: None,
+                                kind: PointerKind::Mouse,
+                            },
+                        );
+                    }
                 }
                 XComponentInputEvent::Key(key) => match key.action {
                     Action::Down => self.emit_key_event(
@@ -189,36 +306,126 @@ impl EventLoop {
                 },
             },
             InputEvent::ArkUi(event) => self.handle_arkui_input_event(event, app),
-            InputEvent::Ime(data) => match data {
-                ImeEvent::TextInputEvent(s) => {
-                    app.window_event(
-                        &self.window_target,
-                        GLOBAL_WINDOW,
-                        event::WindowEvent::Ime(Ime::Commit(s.text.clone())),
-                    );
-                }
-                ImeEvent::BackspaceEvent(_) => {
-                    self.emit_synthetic_key(Keycode::Del, app);
-                }
-                ImeEvent::EnterEvent(_) => self.emit_synthetic_key(Keycode::Enter, app),
-                ImeEvent::ImeStatusEvent(status) => match status {
-                    KeyboardStatus::Hide => {
+            InputEvent::Ime(data) => {
+                match data {
+                    ImeEvent::TextInputEvent(s) => {
                         app.window_event(
                             &self.window_target,
-                            GLOBAL_WINDOW,
-                            event::WindowEvent::Ime(Ime::Disabled),
+                            self.current_window,
+                            event::WindowEvent::Ime(Ime::Commit(s.text.clone())),
                         );
                     }
-                    KeyboardStatus::Show => {
+                    ImeEvent::BackspaceEvent(count) | ImeEvent::DeleteForwardEvent(count) => {
+                        let count = (*count).max(0) as usize;
+                        let (before, after) = if matches!(data, ImeEvent::BackspaceEvent(_)) {
+                            (count, 0)
+                        } else {
+                            (0, count)
+                        };
+                        self.window_target
+                            .shared
+                            .lock()
+                            .ime_edits
+                            .push(crate::ImeEdit::DeleteSurrounding { before, after });
                         app.window_event(
                             &self.window_target,
-                            GLOBAL_WINDOW,
+                            self.current_window,
                             event::WindowEvent::Ime(Ime::Enabled),
                         );
                     }
-                    KeyboardStatus::None => trace!("Ignoring an empty OHOS IME status event"),
-                },
-            },
+                    ImeEvent::PreviewTextEvent { text, .. } => app.window_event(
+                        &self.window_target,
+                        self.current_window,
+                        event::WindowEvent::Ime(Ime::Preedit(
+                            text.clone(),
+                            Some((text.len(), text.len())),
+                        )),
+                    ),
+                    ImeEvent::FinishPreviewEvent => app.window_event(
+                        &self.window_target,
+                        self.current_window,
+                        event::WindowEvent::Ime(Ime::Preedit(String::new(), None)),
+                    ),
+                    ImeEvent::MoveCursorEvent(direction) => {
+                        use openharmony_ability::ime::Direction;
+                        let key = match direction {
+                            Direction::Left => Some(Keycode::DpadLeft),
+                            Direction::Right => Some(Keycode::DpadRight),
+                            Direction::Up => Some(Keycode::DpadUp),
+                            Direction::Down => Some(Keycode::DpadDown),
+                            Direction::None => None,
+                        };
+                        if let Some(key) = key {
+                            self.emit_synthetic_key(key, app);
+                        }
+                    }
+                    ImeEvent::ExtendActionEvent(action) => {
+                        use openharmony_ability::ime::Action;
+                        let key = match action {
+                            Action::Copy => Keycode::Copy,
+                            Action::Cut => Keycode::Cut,
+                            Action::Paste => Keycode::Paste,
+                            Action::SelectAll => Keycode::A,
+                        };
+                        let select_all = matches!(action, Action::SelectAll);
+                        let modifiers = self.input.modifiers;
+                        if select_all {
+                            self.input.modifiers.insert(ModifiersState::CONTROL);
+                            app.window_event(
+                                &self.window_target,
+                                self.current_window,
+                                event::WindowEvent::ModifiersChanged(Modifiers::new(
+                                    self.input.modifiers,
+                                    self.input.modifier_keys,
+                                )),
+                            );
+                        }
+                        self.emit_synthetic_key(key, app);
+                        if select_all {
+                            self.input.modifiers = modifiers;
+                            app.window_event(
+                                &self.window_target,
+                                self.current_window,
+                                event::WindowEvent::ModifiersChanged(Modifiers::new(
+                                    self.input.modifiers,
+                                    self.input.modifier_keys,
+                                )),
+                            );
+                        }
+                    }
+                    ImeEvent::SelectionEvent { start, end } => {
+                        self.window_target.shared.lock().ime_edits.push(
+                            crate::ImeEdit::Selection {
+                                start: (*start).max(0) as usize,
+                                end: (*end).max(0) as usize,
+                            },
+                        );
+                        app.window_event(
+                            &self.window_target,
+                            self.current_window,
+                            event::WindowEvent::Ime(Ime::Enabled),
+                        );
+                    }
+                    ImeEvent::EnterEvent(_) => self.emit_synthetic_key(Keycode::Enter, app),
+                    ImeEvent::ImeStatusEvent(status) => match status {
+                        KeyboardStatus::Hide => {
+                            app.window_event(
+                                &self.window_target,
+                                self.current_window,
+                                event::WindowEvent::Ime(Ime::Disabled),
+                            );
+                        }
+                        KeyboardStatus::Show => {
+                            app.window_event(
+                                &self.window_target,
+                                self.current_window,
+                                event::WindowEvent::Ime(Ime::Enabled),
+                            );
+                        }
+                        KeyboardStatus::None => trace!("Ignoring an empty OHOS IME status event"),
+                    },
+                }
+            }
         }
     }
 
@@ -228,18 +435,87 @@ impl EventLoop {
         app: &mut A,
     ) {
         match event {
-            ArkUiInputEvent::Axis(event) => app.window_event(
-                &self.window_target,
-                GLOBAL_WINDOW,
-                event::WindowEvent::MouseWheel {
-                    device_id: None,
-                    delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(
-                        event.delta_x,
-                        event.delta_y,
-                    )),
-                    phase: touch_phase_from_arkui(event.pointer.action),
-                },
-            ),
+            ArkUiInputEvent::Pointer(pointer) => {
+                // Metadata only: do not duplicate the corresponding native input.
+                crate::drag_drop::set_pointer(self.current_window, pointer.pointer_id);
+            }
+            ArkUiInputEvent::KeyPreIme(key) => self.sync_key_modifiers(key, app),
+            ArkUiInputEvent::Key(key) => {
+                self.sync_key_modifiers(key, app);
+                let state = match key.action {
+                    Action::Down => ElementState::Pressed,
+                    Action::Up => ElementState::Released,
+                    Action::Unknown => return,
+                };
+                self.emit_key_event_with_unicode(
+                    key.code,
+                    state,
+                    Some(DeviceId::from_raw(key.device_id)),
+                    false,
+                    false,
+                    char::from_u32(key.unicode).filter(|ch| !ch.is_control()),
+                    app,
+                );
+            }
+            ArkUiInputEvent::Drag(drag) => {
+                let offset = self.window_target.shared.lock().surface_position;
+                let events = self.window_target.drag_drop.lock().unwrap().event(
+                    self.current_window,
+                    drag,
+                    offset,
+                );
+                for event in events {
+                    app.window_event(&self.window_target, self.current_window, event);
+                }
+            }
+            ArkUiInputEvent::Axis(event) => {
+                let mouse_wheel = event.pointer.tool_type == UIInputToolType::Mouse;
+                // A wheel notch arrives as a complete Down/Move/Up sequence in one
+                // frame. It is a discrete scroll, not a touchpad gesture. In egui,
+                // a gesture End would clear the deltas queued in that same frame.
+                if mouse_wheel && event.pointer.action != UIInputAction::Move {
+                    return;
+                }
+                let position =
+                    PhysicalPosition::new(f64::from(event.pointer.x), f64::from(event.pointer.y));
+                self.ensure_mouse_entered(None, position, app);
+                app.window_event(
+                    &self.window_target,
+                    self.current_window,
+                    event::WindowEvent::PointerMoved {
+                        device_id: None,
+                        position,
+                        primary: true,
+                        source: PointerSource::Mouse,
+                    },
+                );
+                // OHOS wheel values are degrees (15 per notch); touchpads use pixels.
+                // Positive OHOS values scroll down/right, opposite winit's convention.
+                let delta = if mouse_wheel {
+                    MouseScrollDelta::LineDelta(
+                        (-event.delta_x / 15.0) as f32,
+                        (-event.delta_y / 15.0) as f32,
+                    )
+                } else {
+                    MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+                        -event.delta_x,
+                        -event.delta_y,
+                    ))
+                };
+                app.window_event(
+                    &self.window_target,
+                    self.current_window,
+                    event::WindowEvent::MouseWheel {
+                        device_id: None,
+                        delta,
+                        phase: if mouse_wheel {
+                            TouchPhase::Moved
+                        } else {
+                            touch_phase_from_arkui(event.pointer.action)
+                        },
+                    },
+                );
+            }
             ArkUiInputEvent::Gesture(GestureEvent::Tap(event)) => {
                 let finger_id = event.pointer.pointer_id.unwrap_or(0);
                 self.emit_touch_point(
@@ -263,7 +539,7 @@ impl EventLoop {
             }
             ArkUiInputEvent::Gesture(GestureEvent::Pan(event)) => app.window_event(
                 &self.window_target,
-                GLOBAL_WINDOW,
+                self.current_window,
                 event::WindowEvent::PanGesture {
                     device_id: None,
                     delta: PhysicalPosition::new(event.delta_x, event.delta_y),
@@ -275,6 +551,93 @@ impl EventLoop {
                 // which preserves its motion without inventing a second synthetic event.
                 trace!("Ignoring an OHOS swipe event after its pan stream");
             }
+        }
+    }
+
+    fn handle_pen_event<A: ApplicationHandler>(
+        &mut self,
+        position: PhysicalPosition<f64>,
+        action: UIInputAction,
+        kind: event::TabletToolKind,
+        data: event::TabletToolData,
+        app: &mut A,
+    ) {
+        use event::TabletToolButton;
+        self.window_target.shared.lock().pointer_position = position;
+        if action == UIInputAction::Cancel {
+            app.window_event(
+                &self.window_target,
+                self.current_window,
+                event::WindowEvent::PointerLeft {
+                    device_id: None,
+                    primary: true,
+                    position: Some(position),
+                    kind: PointerKind::TabletTool(kind),
+                },
+            );
+            return;
+        }
+        if action == UIInputAction::Down {
+            app.window_event(
+                &self.window_target,
+                self.current_window,
+                event::WindowEvent::PointerEntered {
+                    device_id: None,
+                    primary: true,
+                    position,
+                    kind: PointerKind::TabletTool(kind),
+                },
+            );
+        }
+        app.window_event(
+            &self.window_target,
+            self.current_window,
+            event::WindowEvent::PointerMoved {
+                device_id: None,
+                primary: true,
+                position,
+                source: PointerSource::TabletTool {
+                    kind,
+                    data: data.clone(),
+                },
+            },
+        );
+        if matches!(
+            action,
+            UIInputAction::Down | UIInputAction::Up | UIInputAction::Cancel
+        ) {
+            app.window_event(
+                &self.window_target,
+                self.current_window,
+                event::WindowEvent::PointerButton {
+                    device_id: None,
+                    primary: true,
+                    position,
+                    state: if action == UIInputAction::Down {
+                        ElementState::Pressed
+                    } else {
+                        ElementState::Released
+                    },
+                    button: ButtonSource::TabletTool {
+                        kind,
+                        button: TabletToolButton::Contact,
+                        data,
+                    },
+                    is_macos_activation_click: false,
+                },
+            );
+        }
+        if matches!(action, UIInputAction::Up | UIInputAction::Cancel) {
+            app.window_event(
+                &self.window_target,
+                self.current_window,
+                event::WindowEvent::PointerLeft {
+                    device_id: None,
+                    primary: true,
+                    position: Some(position),
+                    kind: PointerKind::TabletTool(kind),
+                },
+            );
         }
     }
 
@@ -347,6 +710,39 @@ impl EventLoop {
         point: &TouchPointData,
         app: &mut A,
     ) {
+        if let Some(kind) = crate::stylus::tool_kind(point.event_tool_type)
+            .or_else(|| self.input.pen_metadata.map(|_| event::TabletToolKind::Pen))
+        {
+            let mut data = self
+                .input
+                .pen_metadata
+                .map(crate::stylus::tablet_data)
+                .unwrap_or_default();
+            data.force = point
+                .force
+                .is_finite()
+                .then(|| Force::Normalized(normalized_force(point.force)));
+            if let Some((x, y)) = point.tilt_x.zip(point.tilt_y) {
+                data.tilt = Some(event::TabletToolTilt {
+                    x: x.round().clamp(-90.0, 90.0) as i8,
+                    y: y.round().clamp(-90.0, 90.0) as i8,
+                });
+            }
+            let action = match event.event_type {
+                TouchEvent::Down => UIInputAction::Down,
+                TouchEvent::Up => UIInputAction::Up,
+                TouchEvent::Cancel => UIInputAction::Cancel,
+                _ => UIInputAction::Move,
+            };
+            self.handle_pen_event(
+                PhysicalPosition::new(f64::from(point.x), f64::from(point.y)),
+                action,
+                kind,
+                data,
+                app,
+            );
+            return;
+        }
         self.emit_touch_point(
             event.event_type,
             point.id,
@@ -369,7 +765,27 @@ impl EventLoop {
         raw_device_id: i64,
         app: &mut A,
     ) {
+        if let Some(pen) = self.input.pen_metadata {
+            let action = match action {
+                TouchEvent::Down => UIInputAction::Down,
+                TouchEvent::Up => UIInputAction::Up,
+                TouchEvent::Cancel => UIInputAction::Cancel,
+                _ => UIInputAction::Move,
+            };
+            self.handle_pen_event(
+                PhysicalPosition::new(f64::from(x), f64::from(y)),
+                action,
+                event::TabletToolKind::Pen,
+                crate::stylus::tablet_data(pen),
+                app,
+            );
+            return;
+        }
         let finger_id = FingerId::from_raw(usize::try_from(raw_finger_id).unwrap_or(0));
+        self.update_window_drag(
+            PhysicalPosition::new(x as f64, y as f64),
+            matches!(action, TouchEvent::Up | TouchEvent::Cancel),
+        );
         let device_id = Some(DeviceId::from_raw(raw_device_id));
         let position = PhysicalPosition::new(x as f64, y as f64);
         let force = Some(Force::Normalized(normalized_force(raw_force)));
@@ -379,16 +795,16 @@ impl EventLoop {
 
         match action {
             TouchEvent::Down => {
-                let first_contact = self.pressed_fingers.is_empty();
-                let newly_pressed = self.pressed_fingers.insert(raw_finger_id);
+                let first_contact = self.input.pressed_fingers.is_empty();
+                let newly_pressed = self.input.pressed_fingers.insert(raw_finger_id);
                 if first_contact {
-                    self.primary_pointer = Some(finger_id);
+                    self.input.primary_pointer = Some(finger_id);
                 }
-                let primary = self.primary_pointer == Some(finger_id);
+                let primary = self.input.primary_pointer == Some(finger_id);
                 if newly_pressed {
                     app.window_event(
                         &self.window_target,
-                        GLOBAL_WINDOW,
+                        self.current_window,
                         event::WindowEvent::PointerEntered {
                             device_id,
                             primary,
@@ -399,7 +815,7 @@ impl EventLoop {
                 }
                 app.window_event(
                     &self.window_target,
-                    GLOBAL_WINDOW,
+                    self.current_window,
                     event::WindowEvent::PointerButton {
                         device_id,
                         primary,
@@ -412,21 +828,21 @@ impl EventLoop {
             }
             TouchEvent::Move => app.window_event(
                 &self.window_target,
-                GLOBAL_WINDOW,
+                self.current_window,
                 event::WindowEvent::PointerMoved {
                     device_id,
-                    primary: self.primary_pointer == Some(finger_id),
+                    primary: self.input.primary_pointer == Some(finger_id),
                     position,
                     source,
                 },
             ),
             TouchEvent::Up | TouchEvent::Cancel => {
-                let primary = self.primary_pointer == Some(finger_id);
-                self.pressed_fingers.remove(&raw_finger_id);
+                let primary = self.input.primary_pointer == Some(finger_id);
+                self.input.pressed_fingers.remove(&raw_finger_id);
                 if matches!(action, TouchEvent::Up) {
                     app.window_event(
                         &self.window_target,
-                        GLOBAL_WINDOW,
+                        self.current_window,
                         event::WindowEvent::PointerButton {
                             device_id,
                             primary,
@@ -439,7 +855,7 @@ impl EventLoop {
                 }
                 app.window_event(
                     &self.window_target,
-                    GLOBAL_WINDOW,
+                    self.current_window,
                     event::WindowEvent::PointerLeft {
                         device_id,
                         primary,
@@ -448,10 +864,87 @@ impl EventLoop {
                     },
                 );
                 if primary {
-                    self.primary_pointer = None;
+                    self.input.primary_pointer = None;
                 }
             }
             TouchEvent::Unknown => {}
+        }
+    }
+
+    fn update_window_drag(&self, position: PhysicalPosition<f64>, released: bool) {
+        let mut state = self.window_target.shared.lock();
+        state.pointer_position = position;
+        if released {
+            state.dragging = None;
+            return;
+        }
+        let Some(drag) = state.dragging else {
+            return;
+        };
+        let screen = PhysicalPosition::new(
+            position.x + f64::from(state.position.x),
+            position.y + f64::from(state.position.y),
+        );
+        let dx = (screen.x - drag.pointer.x) as i32;
+        let dy = (screen.y - drag.pointer.y) as i32;
+        let mut origin = drag.position;
+        let mut size = drag.size;
+        let resize = drag.direction;
+        if let Some(direction) = resize {
+            use ResizeDirection::*;
+            let west = matches!(direction, West | NorthWest | SouthWest);
+            let east = matches!(direction, East | NorthEast | SouthEast);
+            let north = matches!(direction, North | NorthEast | NorthWest);
+            let south = matches!(direction, South | SouthEast | SouthWest);
+            let min = state.min_size.unwrap_or(PhysicalSize::new(1, 1));
+            let max = state
+                .max_size
+                .unwrap_or(PhysicalSize::new(u32::MAX, u32::MAX));
+            if west || east {
+                size.width = (i64::from(drag.size.width)
+                    + if west { -i64::from(dx) } else { i64::from(dx) })
+                .clamp(
+                    i64::from(min.width.max(1)),
+                    i64::from(max.width.max(min.width).max(1)),
+                ) as u32;
+            }
+            if north || south {
+                size.height = (i64::from(drag.size.height)
+                    + if north { -i64::from(dy) } else { i64::from(dy) })
+                .clamp(
+                    i64::from(min.height.max(1)),
+                    i64::from(max.height.max(min.height).max(1)),
+                ) as u32;
+            }
+            if let Some(increments) = state.resize_increments {
+                if increments.width > 0 {
+                    size.width -= size.width % increments.width;
+                }
+                if increments.height > 0 {
+                    size.height -= size.height % increments.height;
+                }
+            }
+            if west {
+                origin.x += drag.size.width as i32 - size.width as i32;
+            }
+            if north {
+                origin.y += drag.size.height as i32 - size.height as i32;
+            }
+        } else {
+            origin.x += dx;
+            origin.y += dy;
+        }
+        drop(state);
+        let window = Window {
+            app: self.openharmony_app.clone(),
+            shared: self.window_target.shared.clone(),
+            id: self.current_window,
+            root_claimed: self.window_target.root_claimed.clone(),
+            owns_window: false,
+        };
+        window.set_outer_position(origin.into());
+        if resize.is_some() {
+            let _ = window.request_surface_size(size.into());
         }
     }
 
@@ -462,6 +955,10 @@ impl EventLoop {
     ) {
         let device_id = Some(DeviceId::from_raw(0));
         let position = PhysicalPosition::new(mouse_event.x as f64, mouse_event.y as f64);
+        self.update_window_drag(
+            position,
+            matches!(mouse_event.action, OhosMouseAction::Release),
+        );
 
         match mouse_event.action {
             OhosMouseAction::Press | OhosMouseAction::Release | OhosMouseAction::Move => {
@@ -473,7 +970,7 @@ impl EventLoop {
         match mouse_event.action {
             OhosMouseAction::Move => app.window_event(
                 &self.window_target,
-                GLOBAL_WINDOW,
+                self.current_window,
                 event::WindowEvent::PointerMoved {
                     device_id,
                     position,
@@ -483,7 +980,7 @@ impl EventLoop {
             ),
             OhosMouseAction::Press | OhosMouseAction::Release => app.window_event(
                 &self.window_target,
-                GLOBAL_WINDOW,
+                self.current_window,
                 event::WindowEvent::PointerButton {
                     device_id,
                     state: if matches!(mouse_event.action, OhosMouseAction::Press) {
@@ -507,13 +1004,13 @@ impl EventLoop {
         position: PhysicalPosition<f64>,
         app: &mut A,
     ) {
-        if self.mouse_inside {
+        if self.input.mouse_inside {
             return;
         }
-        self.mouse_inside = true;
+        self.input.mouse_inside = true;
         app.window_event(
             &self.window_target,
-            GLOBAL_WINDOW,
+            self.current_window,
             event::WindowEvent::PointerEntered {
                 device_id,
                 position,
@@ -530,7 +1027,7 @@ impl EventLoop {
                 state,
                 Some(DeviceId::from_raw(0)),
                 false,
-                true,
+                false,
                 app,
             );
         }
@@ -545,15 +1042,61 @@ impl EventLoop {
         is_synthetic: bool,
         app: &mut A,
     ) {
+        self.emit_key_event_with_unicode(
+            keycode,
+            state,
+            device_id,
+            repeat,
+            is_synthetic,
+            None,
+            app,
+        );
+    }
+
+    fn sync_key_modifiers<A: ApplicationHandler>(&mut self, key: &KeyboardEventData, app: &mut A) {
+        let Some(pressed) = &key.pressed_keys else {
+            return;
+        };
+        let before = Modifiers::new(self.input.modifiers, self.input.modifier_keys);
+        self.input.modifiers = ModifiersState::empty();
+        self.input.modifier_keys = ModifiersKeys::empty();
+        for code in pressed {
+            self.update_modifiers(*code, ElementState::Pressed);
+        }
+        let after = Modifiers::new(self.input.modifiers, self.input.modifier_keys);
+        if before != after {
+            app.window_event(
+                &self.window_target,
+                self.current_window,
+                event::WindowEvent::ModifiersChanged(after),
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_key_event_with_unicode<A: ApplicationHandler>(
+        &mut self,
+        keycode: Keycode,
+        state: ElementState,
+        device_id: Option<DeviceId>,
+        repeat: bool,
+        is_synthetic: bool,
+        unicode: Option<char>,
+        app: &mut A,
+    ) {
         if let Some(modifiers) = self.update_modifiers(keycode, state) {
             app.window_event(
                 &self.window_target,
-                GLOBAL_WINDOW,
+                self.current_window,
                 event::WindowEvent::ModifiersChanged(modifiers),
             );
         }
 
-        let logical_key = keycodes::to_logical(keycode);
+        let key_without_modifiers = keycodes::to_logical(keycode);
+        let logical_key = unicode.map_or_else(
+            || key_without_modifiers.clone(),
+            |ch| winit_core::keyboard::Key::Character(ch.to_string().into()),
+        );
         let text = if state.is_pressed() {
             logical_key.to_text().map(Into::into)
         } else {
@@ -561,7 +1104,7 @@ impl EventLoop {
         };
         app.window_event(
             &self.window_target,
-            GLOBAL_WINDOW,
+            self.current_window,
             event::WindowEvent::KeyboardInput {
                 device_id,
                 event: event::KeyEvent {
@@ -572,7 +1115,7 @@ impl EventLoop {
                     repeat,
                     text: text.clone(),
                     text_with_all_modifiers: text,
-                    key_without_modifiers: logical_key,
+                    key_without_modifiers,
                 },
                 is_synthetic,
             },
@@ -591,24 +1134,42 @@ impl EventLoop {
             Keycode::MetaRight => (ModifiersState::META, ModifiersKeys::RMETA),
             _ => return None,
         };
-        let before = Modifiers::new(self.modifiers, self.modifier_keys);
+        let before = Modifiers::new(self.input.modifiers, self.input.modifier_keys);
         if state.is_pressed() {
-            self.modifiers.insert(state_flag);
-            self.modifier_keys.insert(key_flag);
+            self.input.modifiers.insert(state_flag);
+            self.input.modifier_keys.insert(key_flag);
         } else {
-            self.modifiers.remove(state_flag);
-            self.modifier_keys.remove(key_flag);
+            self.input.modifiers.remove(state_flag);
+            self.input.modifier_keys.remove(key_flag);
         }
-        let after = Modifiers::new(self.modifiers, self.modifier_keys);
+        let after = Modifiers::new(self.input.modifiers, self.input.modifier_keys);
         (before != after).then_some(after)
     }
 
     pub fn run_app<A: ApplicationHandler + 'static>(
         mut self,
-        mut app: A,
+        app: A,
     ) -> Result<(), EventLoopError> {
         let openharmony_app = self.openharmony_app.clone();
-        openharmony_app.run_loop(move |event| self.single_iteration(event, &mut app));
+        let mut app = Some(app);
+        openharmony_app.run_loop(move |event| {
+            let destroyed = matches!(event, MainEvent::Destroy);
+            if let Some(app) = app.as_mut() {
+                self.single_iteration(event, app);
+            }
+            // Ability retains this callback. Release application and GPU resources at
+            // shutdown instead of keeping them alive in the callback forever.
+            if destroyed {
+                app.take();
+            } else if self.window_target.exiting() && app.take().is_some() {
+                    let bridge = self.openharmony_app.bridge();
+                    crate::task::spawn(async move {
+                        use crate::plugins::app_control::{AppControlBridgePlugin, TerminateRequest, TerminateResponse};
+                        let result = async { bridge?.call_sync_from_worker::<AppControlBridgePlugin, TerminateRequest, TerminateResponse>("terminate", TerminateRequest { code: 0 }).await }.await;
+                        if let Err(error) = result { warn!("OHOS terminate: {error}"); }
+                    });
+            }
+        });
         Ok(())
     }
 
@@ -644,6 +1205,30 @@ impl EventLoop {
             return;
         }
 
+        let id = match &event {
+            MainEvent::WindowResize { window_id, .. }
+            | MainEvent::WindowFocusChanged { window_id, .. }
+            | MainEvent::SubWindowInput { window_id, .. }
+            | MainEvent::SubWindowRedraw { window_id, .. } => *window_id,
+            MainEvent::SubWindowSurfaceCreate(id)
+            | MainEvent::SubWindowSurfaceDestroy(id)
+            | MainEvent::SubWindowClosed(id) => *id,
+            MainEvent::ContentRectChange(content) => content.window_id,
+            _ => 0,
+        };
+        let id = WindowId::from_raw(id as usize);
+        let shared = self.window_target.windows.lock().unwrap().get(&id).cloned();
+        let Some(shared) = shared else {
+            return;
+        };
+        if self.current_window != id {
+            self.input_states
+                .insert(self.current_window, std::mem::take(&mut self.input));
+            self.input = self.input_states.remove(&id).unwrap_or_default();
+        }
+        self.current_window = id;
+        self.window_target.shared = shared;
+
         let cause = if self.loop_running {
             start_cause(self.window_target.control_flow(), self.wait_started)
         } else {
@@ -652,10 +1237,45 @@ impl EventLoop {
         };
         let proxy_wake_up = matches!(&event, MainEvent::UserEvent)
             && self.window_target.event_loop_proxy.take_wake_up();
+        for (id, status) in openharmony_ability::drain_pending_window_status() {
+            if let Some(shared) = self
+                .window_target
+                .windows
+                .lock()
+                .unwrap()
+                .get(&WindowId::from_raw(id as usize))
+            {
+                let mut state = shared.lock();
+                state.minimized = status == 3;
+                state.maximized = status == 2;
+                state.fullscreen = (status == 1).then_some(Fullscreen::Borderless(None));
+            }
+        }
         app.new_events(&self.window_target, cause);
+        for id in openharmony_ability::drain_pending_window_closes() {
+            app.window_event(
+                &self.window_target,
+                WindowId::from_raw(id as usize),
+                event::WindowEvent::CloseRequested,
+            );
+        }
         self.handle_main_event(event, app);
         if proxy_wake_up {
             app.proxy_wake_up(&self.window_target);
+        }
+        let transfers = self.window_target.drag_drop.lock().unwrap().drain();
+        for (id, event) in transfers {
+            app.window_event(&self.window_target, id, event);
+        }
+        if let Some((id, event)) = crate::drag_drop::drain_outgoing() {
+            app.window_event(&self.window_target, id, event);
+        }
+        if crate::events::take_pending() && self.surface_available {
+            app.window_event(
+                &self.window_target,
+                GLOBAL_WINDOW,
+                event::WindowEvent::RedrawRequested,
+            );
         }
         app.about_to_wait(&self.window_target);
         if self.window_target.exiting() {
@@ -671,12 +1291,12 @@ impl EventLoop {
         match event {
             MainEvent::SurfaceCreate => self.surface_created(app),
             MainEvent::SurfaceDestroy => self.surface_destroyed(app),
-            MainEvent::WindowResize(size) => {
+            MainEvent::WindowResize { size, .. } => {
                 self.update_surface_size(physical_size(size.width, size.height), app)
             }
             MainEvent::WindowRedraw(_) => app.window_event(
                 &self.window_target,
-                GLOBAL_WINDOW,
+                self.current_window,
                 event::WindowEvent::RedrawRequested,
             ),
             MainEvent::ContentRectChange(content) => {
@@ -692,12 +1312,13 @@ impl EventLoop {
                 if moved {
                     app.window_event(
                         &self.window_target,
-                        GLOBAL_WINDOW,
+                        self.current_window,
                         event::WindowEvent::Moved(position),
                     );
                 }
             }
             MainEvent::AvoidAreaChange(_) | MainEvent::KeyboardEvent(_) => {}
+            MainEvent::WindowFocusChanged { focused, .. } => self.update_focus(focused, app),
             MainEvent::GainedFocus => self.update_focus(true, app),
             MainEvent::LostFocus => self.update_focus(false, app),
             MainEvent::ConfigChanged(configuration) => {
@@ -713,35 +1334,129 @@ impl EventLoop {
             }
             MainEvent::WindowDestroy => app.window_event(
                 &self.window_target,
-                GLOBAL_WINDOW,
+                self.current_window,
                 event::WindowEvent::CloseRequested,
             ),
             MainEvent::Destroy => {
                 self.surface_destroyed(app);
                 app.window_event(
                     &self.window_target,
-                    GLOBAL_WINDOW,
+                    self.current_window,
                     event::WindowEvent::Destroyed,
                 );
             }
             MainEvent::Input(input_event) => self.handle_input_event(&input_event, app),
             MainEvent::Create | MainEvent::WindowCreate | MainEvent::SaveState(_) => {}
-            MainEvent::UserEvent => {}
+            MainEvent::UserEvent => {
+                let windows: Vec<_> = self
+                    .window_target
+                    .windows
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(id, state)| (*id, state.clone()))
+                    .collect();
+                for (id, state) in windows {
+                    let redraw = std::mem::take(&mut state.lock().redraw_pending);
+                    if redraw
+                        && self
+                            .openharmony_app
+                            .native_window_for(id.into_raw() as i64)
+                            .is_some()
+                    {
+                        app.window_event(
+                            &self.window_target,
+                            id,
+                            event::WindowEvent::RedrawRequested,
+                        );
+                    }
+                }
+            }
+            MainEvent::SubWindowSurfaceCreate(_) => {
+                self.synchronize_window_state();
+                if let Some(ready) = self.window_target.shared.ready.lock().unwrap().take() {
+                    let _ = ready.send(());
+                }
+                let attrs = self.window_target.shared.lock().initial_attributes.take();
+                if let Some(attrs) = attrs {
+                    let window = Window {
+                        app: self.openharmony_app.clone(),
+                        shared: self.window_target.shared.clone(),
+                        id: self.current_window,
+                        root_claimed: self.window_target.root_claimed.clone(),
+                        owns_window: false,
+                    };
+                    window.configure(attrs);
+                }
+                // The surface handle is now available. Re-enter renderer setup;
+                // existing surfaces are retained by the integration.
+                app.can_create_surfaces(&self.window_target);
+                app.window_event(
+                    &self.window_target,
+                    self.current_window,
+                    event::WindowEvent::RedrawRequested,
+                );
+            }
+            MainEvent::SubWindowInput { event, .. } => self.handle_input_event(&event, app),
+            MainEvent::SubWindowRedraw { .. } => app.window_event(
+                &self.window_target,
+                self.current_window,
+                event::WindowEvent::RedrawRequested,
+            ),
+            MainEvent::SubWindowSurfaceDestroy(_) | MainEvent::SubWindowClosed(_) => {
+                crate::drag_drop::cancel_outgoing(Some(self.current_window));
+                app.window_event(
+                    &self.window_target,
+                    self.current_window,
+                    event::WindowEvent::CloseRequested,
+                );
+                app.window_event(
+                    &self.window_target,
+                    self.current_window,
+                    event::WindowEvent::Destroyed,
+                );
+                self.window_target
+                    .windows
+                    .lock()
+                    .unwrap()
+                    .remove(&self.current_window);
+                self.input_states.remove(&self.current_window);
+            }
+            MainEvent::NewWant { uri } => {
+                crate::events::emit(crate::events::PlatformEvent::Want {
+                    uri,
+                    parameters: self.openharmony_app.take_want_parameters(),
+                });
+                app.window_event(
+                    &self.window_target,
+                    GLOBAL_WINDOW,
+                    event::WindowEvent::RedrawRequested,
+                );
+            }
         }
     }
 
     fn surface_created<A: ApplicationHandler>(&mut self, app: &mut A) {
+        let uri = self.openharmony_app.take_initial_want_uri();
+        let parameters = self.openharmony_app.take_want_parameters();
         self.synchronize_window_state();
         self.ensure_resumed(app);
         if !self.surface_available {
             self.surface_available = true;
             app.can_create_surfaces(&self.window_target);
         }
+        if !uri.is_empty() || !parameters.is_empty() {
+            crate::events::emit(crate::events::PlatformEvent::Want { uri, parameters });
+        }
     }
 
     fn synchronize_window_state(&self) {
-        let content_rect = self.openharmony_app.content_rect();
-        let window_rect = self.openharmony_app.window_rect();
+        let content_rect = self
+            .openharmony_app
+            .content_rect_for(self.current_window.into_raw() as i64);
+        let window_rect = self
+            .openharmony_app
+            .window_rect_for(self.current_window.into_raw() as i64);
         let surface_size = physical_size(content_rect.width, content_rect.height);
         let outer_size = physical_size(window_rect.width, window_rect.height);
         let mut state = self.window_target.shared.lock();
@@ -754,13 +1469,15 @@ impl EventLoop {
     }
 
     fn surface_destroyed<A: ApplicationHandler>(&mut self, app: &mut A) {
+        crate::drag_drop::cancel_outgoing(None);
         if self.surface_available {
             app.destroy_surfaces(&self.window_target);
             self.surface_available = false;
         }
-        self.pressed_fingers.clear();
-        self.primary_pointer = None;
-        self.mouse_inside = false;
+        self.input.pressed_fingers.clear();
+        self.input.pending_touch = None;
+        self.input.primary_pointer = None;
+        self.input.mouse_inside = false;
         self.window_target.shared.lock().surface_size = PhysicalSize::new(0, 0);
         self.suspend(app);
     }
@@ -789,17 +1506,17 @@ impl EventLoop {
         if changed {
             app.window_event(
                 &self.window_target,
-                GLOBAL_WINDOW,
+                self.current_window,
                 event::WindowEvent::Focused(focused),
             );
         }
 
-        if !focused && (!self.modifiers.is_empty() || !self.modifier_keys.is_empty()) {
-            self.modifiers = ModifiersState::empty();
-            self.modifier_keys = ModifiersKeys::empty();
+        if !focused && (!self.input.modifiers.is_empty() || !self.input.modifier_keys.is_empty()) {
+            self.input.modifiers = ModifiersState::empty();
+            self.input.modifier_keys = ModifiersKeys::empty();
             app.window_event(
                 &self.window_target,
-                GLOBAL_WINDOW,
+                self.current_window,
                 event::WindowEvent::ModifiersChanged(Modifiers::default()),
             );
         }
@@ -815,14 +1532,19 @@ impl EventLoop {
         if changed {
             app.window_event(
                 &self.window_target,
-                GLOBAL_WINDOW,
+                self.current_window,
                 event::WindowEvent::Occluded(!visible),
             );
         }
     }
 
     fn update_surface_size<A: ApplicationHandler>(&self, size: PhysicalSize<u32>, app: &mut A) {
-        let content_rect = self.openharmony_app.content_rect();
+        let content_rect = self
+            .openharmony_app
+            .content_rect_for(self.current_window.into_raw() as i64);
+        // Window-manager resize notifications include system bars. Only XComponent
+        // geometry describes the EGL surface; its callback updates this rect first.
+        let size = nonzero_size_or(physical_size(content_rect.width, content_rect.height), size);
         let changed = {
             let mut state = self.window_target.shared.lock();
             let changed = state.surface_size != size;
@@ -836,7 +1558,7 @@ impl EventLoop {
         if changed {
             app.window_event(
                 &self.window_target,
-                GLOBAL_WINDOW,
+                self.current_window,
                 event::WindowEvent::SurfaceResized(size),
             );
         }
@@ -859,7 +1581,7 @@ impl EventLoop {
             self.window_target.shared.lock().scale_factor = scale_factor;
             app.window_event(
                 &self.window_target,
-                GLOBAL_WINDOW,
+                self.current_window,
                 event::WindowEvent::ScaleFactorChanged {
                     surface_size_writer: SurfaceSizeWriter::new(Arc::downgrade(&requested_size)),
                     scale_factor,
@@ -879,7 +1601,7 @@ impl EventLoop {
             if let Some(theme) = theme {
                 app.window_event(
                     &self.window_target,
-                    GLOBAL_WINDOW,
+                    self.current_window,
                     event::WindowEvent::ThemeChanged(theme),
                 );
             }
@@ -911,7 +1633,7 @@ impl EventLoopProvider for EventLoop {
     fn create_custom_cursor(
         &self,
         source: CustomCursorSource,
-    ) -> Result<CustomCursor, RequestError> {
+    ) -> Result<CustomCursor, CustomCursorError> {
         self.window_target.create_custom_cursor(source)
     }
 }
@@ -967,9 +1689,65 @@ pub struct ActiveEventLoop {
     exit: Cell<bool>,
     event_loop_proxy: Arc<EventLoopProxy>,
     shared: Arc<SharedWindowState>,
+    windows: Mutex<HashMap<WindowId, Arc<SharedWindowState>>>,
+    drag_drop: Mutex<crate::drag_drop::DragDrop>,
+    root_claimed: Arc<AtomicBool>,
 }
 
 impl RootActiveEventLoop for ActiveEventLoop {
+    fn start_drag(
+        &self,
+        source: WindowId,
+        send_data: Box<dyn winit_core::data_transfer::DataTransferSend>,
+        actions: &[winit_core::event_loop::DndAction],
+        icon: Option<winit_core::event_loop::DragIcon>,
+    ) -> Result<winit_core::data_transfer::DataTransferId, winit_core::error::TransferError> {
+        use winit_core::data_transfer::{SendData, TypeHint};
+        use winit_core::error::TransferError;
+        if !actions.iter().any(|action| {
+            matches!(
+                action,
+                winit_core::event_loop::DndAction::Copy | winit_core::event_loop::DndAction::Move
+            )
+        }) {
+            return Err(TransferError::NotSupported(NotSupportedError::new(
+                "OHOS file drags support Copy or Move",
+            )));
+        }
+        let uris = match send_data.data_for_type(&TypeHint::UriList) {
+            Some(SendData::Uris(uris)) => uris,
+            Some(SendData::String(text)) => crate::drag_drop::parse_uris(&text),
+            Some(SendData::Bytes(bytes)) => crate::drag_drop::parse_uris(
+                &String::from_utf8(bytes).map_err(|_| TransferError::Failed)?,
+            ),
+            _ => return Err(TransferError::Failed),
+        };
+        let preview = icon
+            .map(|icon| {
+                let image = icon
+                    .icon
+                    .cast_ref::<winit_core::icon::RgbaIcon>()
+                    .ok_or(TransferError::Failed)?;
+                let preview = openharmony_ability::DragPreview {
+                    rgba: image.buffer().to_vec(),
+                    width: image.width(),
+                    height: image.height(),
+                    hotspot_x: -(icon.offset_x as f32),
+                    hotspot_y: -(icon.offset_y as f32),
+                };
+                preview.validate().map_err(|_| TransferError::Failed)?;
+                Ok::<_, TransferError>(preview)
+            })
+            .transpose()?;
+        crate::drag_drop::start_file_drag_with_options(
+            &self.app,
+            source,
+            uris,
+            actions.to_vec(),
+            preview,
+        )
+    }
+
     fn create_proxy(&self) -> CoreEventLoopProxy {
         CoreEventLoopProxy::new(self.event_loop_proxy.clone())
     }
@@ -977,23 +1755,52 @@ impl RootActiveEventLoop for ActiveEventLoop {
     fn create_window(
         &self,
         window_attributes: WindowAttributes,
-    ) -> Result<Box<dyn CoreWindow>, RequestError> {
+    ) -> Result<Box<dyn CoreWindow>, CreateWindowError> {
         Ok(Box::new(Window::new(self, window_attributes)?))
+    }
+
+    fn data_transfer(
+        &self,
+        id: winit_core::data_transfer::DataTransferId,
+    ) -> Result<Box<dyn winit_core::data_transfer::DataTransfer>, winit_core::error::TransferError>
+    {
+        self.drag_drop.lock().unwrap().data(id)
+    }
+    fn fetch_data_transfer(
+        &self,
+        id: winit_core::data_transfer::DataTransferId,
+        ty: &dyn winit_core::data_transfer::TransferType,
+    ) -> Result<winit_core::event_loop::AsyncRequestSerial, winit_core::error::TransferError> {
+        let result = self.drag_drop.lock().unwrap().fetch(id, ty);
+        self.app.create_waker().wake();
+        result
+    }
+    fn set_valid_dnd_actions(
+        &self,
+        id: winit_core::data_transfer::DataTransferId,
+        actions: &[winit_core::event_loop::DndAction],
+    ) -> Result<(), winit_core::error::TransferError> {
+        self.drag_drop.lock().unwrap().accept(id, actions)
     }
 
     fn create_custom_cursor(
         &self,
-        _source: CustomCursorSource,
-    ) -> Result<CustomCursor, RequestError> {
-        Err(NotSupportedError::new("create_custom_cursor is not supported").into())
+        source: CustomCursorSource,
+    ) -> Result<CustomCursor, CustomCursorError> {
+        match source {
+            CustomCursorSource::Image(image) if image.width() <= 256 && image.height() <= 256 => {
+                Ok(CustomCursor(Arc::new(crate::cursor::ImageCursor(image))))
+            }
+            _ => Err(CustomCursorError::NotSupported),
+        }
     }
 
     fn available_monitors(&self) -> Box<dyn Iterator<Item = CoreMonitorHandle>> {
-        Box::new(std::iter::empty())
+        Box::new(crate::monitor::all().into_iter())
     }
 
     fn primary_monitor(&self) -> Option<CoreMonitorHandle> {
-        None
+        crate::monitor::primary()
     }
 
     fn system_theme(&self) -> Option<Theme> {
@@ -1057,30 +1864,233 @@ impl window::PlatformWindowAttributes for PlatformSpecificWindowAttributes {
 pub struct Window {
     app: OpenHarmonyApp,
     shared: Arc<SharedWindowState>,
+    id: WindowId,
+    root_claimed: Arc<AtomicBool>,
+    owns_window: bool,
 }
 
 impl Window {
     pub(crate) fn new(
         el: &ActiveEventLoop,
-        _window_attrs: window::WindowAttributes,
-    ) -> Result<Self, RequestError> {
-        // The primary OHOS window and its XComponent surface are owned by NativeAbility.
-        // Attributes that would create or configure an OS window are therefore not applicable.
-
-        Ok(Self {
+        attrs: window::WindowAttributes,
+    ) -> Result<Self, CreateWindowError> {
+        let root = !el.root_claimed.swap(true, Ordering::AcqRel);
+        let id = if root {
+            GLOBAL_WINDOW
+        } else {
+            let size = attrs
+                .surface_size
+                .unwrap_or(Size::Physical(PhysicalSize::new(800, 600)))
+                .to_physical::<u32>(scale_factor(&el.app));
+            let position = attrs
+                .position
+                .unwrap_or(Position::Physical(PhysicalPosition::new(100, 100)))
+                .to_physical::<i32>(scale_factor(&el.app));
+            let id = openharmony_ability::window::create_os_window(
+                openharmony_ability::window::WindowCreateParams {
+                    name: attrs.title.clone(),
+                    native_module_name: el.app.module_name(),
+                    width: size.width as i32,
+                    height: size.height as i32,
+                    x: position.x,
+                    y: position.y,
+                    decorations: attrs.decorations,
+                    transparent: attrs.transparent,
+                    ..Default::default()
+                },
+            )
+            .map_err(|err| {
+                CreateWindowError::Os(OsError::new(
+                    line!(),
+                    file!(),
+                    std::io::Error::other(err.to_string()),
+                ))
+            })?;
+            WindowId::from_raw(id as usize)
+        };
+        let shared = if root {
+            el.windows
+                .lock()
+                .unwrap()
+                .get(&GLOBAL_WINDOW)
+                .unwrap()
+                .clone()
+        } else {
+            let shared = Arc::new(SharedWindowState::new(&el.app, id.into_raw() as i64));
+            shared.lock().scale_factor = scale_factor(&el.app);
+            el.windows.lock().unwrap().insert(id, shared.clone());
+            shared
+        };
+        let window = Self {
             app: el.app.clone(),
-            shared: el.shared.clone(),
-        })
+            shared,
+            id,
+            root_claimed: el.root_claimed.clone(),
+            owns_window: true,
+        };
+        if root {
+            window.configure(attrs);
+        } else {
+            window.shared.lock().initial_attributes = Some(attrs);
+        }
+        Ok(window)
+    }
+
+    fn configure(&self, attrs: WindowAttributes) {
+        let window = self;
+        window.set_title(&attrs.title);
+        if attrs.window_icon.is_some() {
+            window.set_window_icon(attrs.window_icon.clone());
+        }
+        window.set_resizable(attrs.resizable);
+        window.set_decorations(attrs.decorations);
+        window.set_enabled_buttons(attrs.enabled_buttons);
+        window.set_min_surface_size(attrs.min_surface_size);
+        window.set_max_surface_size(attrs.max_surface_size);
+        if attrs.transparent {
+            window.set_transparent(true);
+        }
+        if attrs.blur {
+            window.set_blur(true);
+        }
+        if attrs.maximized {
+            window.set_maximized(true);
+        }
+        if let Some(fullscreen) = attrs.fullscreen {
+            window.set_fullscreen(Some(fullscreen));
+        }
+        if let Some(size) = attrs.surface_size {
+            let _ = window.request_surface_size(size);
+        }
+        if let Some(position) = attrs.position {
+            window.set_outer_position(position);
+        }
+        window.command("resolve window id", |client, state, id| async move {
+            let id = client.get_real_window_id(id).await?;
+            state.lock().real_window_id = i32::try_from(id).ok();
+            Ok(())
+        });
+    }
+
+    fn command<F, Fut>(&self, name: &'static str, operation: F)
+    where
+        F: FnOnce(crate::plugins::window::WindowClient, Arc<SharedWindowState>, i64) -> Fut
+            + Send
+            + 'static,
+        Fut: std::future::Future<Output = openharmony_ability::napi_ohos::Result<()>>
+            + Send
+            + 'static,
+    {
+        let client = crate::plugins::window::WindowClient::new(&self.app);
+        let state = self.shared.clone();
+        let id = self.id.into_raw() as i64;
+        self.shared.commands.push(async move {
+            let result = match client {
+                Ok(client) => operation(client, state, id).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                warn!("OHOS {name}: {error}");
+            }
+        });
+    }
+
+    fn apply_limits(&self) {
+        let state = self.shared.lock();
+        let min = state.min_size.unwrap_or_default();
+        let max = state.max_size.unwrap_or_default();
+        drop(state);
+        self.command("window size limits", move |client, _, id| async move {
+            client
+                .set_window_limits(
+                    id,
+                    min.width.into(),
+                    min.height.into(),
+                    max.width.into(),
+                    max.height.into(),
+                )
+                .await
+        });
+    }
+
+    fn apply_buttons(&self) {
+        let state = self.shared.lock();
+        let buttons = state.enabled_buttons;
+        let flags = i32::from(buttons.contains(WindowButtons::CLOSE))
+            | (i32::from(buttons.contains(WindowButtons::MAXIMIZE)) << 1)
+            | (i32::from(buttons.contains(WindowButtons::MINIMIZE)) << 2)
+            | (i32::from(state.resizable) << 3);
+        drop(state);
+        self.command("window buttons", move |client, _, id| async move {
+            client.set_window_decoration_flags(id, flags).await
+        });
+    }
+
+    fn update_ime(&self, data: window::ImeRequestData) {
+        use openharmony_ability::ime::{EnterKey, InputType, Rect};
+        if let Some(text) = data.surrounding_text {
+            let cursor = text.text()[..text.cursor()].encode_utf16().count();
+            let anchor = text.text()[..text.anchor()].encode_utf16().count();
+            let _ = self.app.update_ime_text_state_for(
+                self.id.into_raw() as i64,
+                openharmony_ability::ime::TextState {
+                    text: text.into_text(),
+                    offset: 0,
+                    selection: cursor.min(anchor)..cursor.max(anchor),
+                    reversed: cursor < anchor,
+                },
+            );
+        }
+
+        if let Some((hint, purpose)) = data.hint_and_purpose {
+            let input_type = match purpose {
+                ImePurpose::Password => InputType::VisiblePassword,
+                _ if hint.contains(window::ImeHint::MULTILINE) => InputType::Multiline,
+                _ => InputType::Text,
+            };
+            if let Err(error) = self.app.configure_ime_for(
+                self.id.into_raw() as i64,
+                if hint.contains(window::ImeHint::MULTILINE) {
+                    EnterKey::Newline
+                } else {
+                    EnterKey::Done
+                },
+                input_type,
+            ) {
+                warn!("Cannot configure OHOS IME: {error}");
+            }
+        }
+        if let Some((position, size)) = data.cursor_area {
+            let state = self.shared.lock();
+            let position = position.to_physical::<f64>(state.scale_factor);
+            let size = size.to_physical::<f64>(state.scale_factor);
+            let rect = Rect {
+                left: f64::from(state.position.x + state.surface_position.x) + position.x,
+                top: f64::from(state.position.y + state.surface_position.y) + position.y,
+                width: size.width,
+                height: size.height,
+            };
+            drop(state);
+            if let Err(error) = self
+                .app
+                .update_ime_cursor_for(self.id.into_raw() as i64, rect)
+            {
+                warn!("Cannot position OHOS IME: {error}");
+            }
+        }
     }
 
     pub fn request_redraw(&self) {
-        // XComponent frame callbacks are owned and scheduled by OHOS. There is no API with which
-        // this backend can actively request one, so `RedrawRequested` is emitted only when Ability
-        // reports `WindowRedraw`.
+        self.shared.lock().redraw_pending = true;
+        self.app.create_waker().wake();
     }
 
     pub fn scale_factor(&self) -> f64 {
         self.shared.lock().scale_factor
+    }
+
+    pub fn take_ime_edits(&self) -> Vec<crate::ImeEdit> {
+        std::mem::take(&mut self.shared.lock().ime_edits)
     }
 
     pub fn config(&self) -> Configuration {
@@ -1088,7 +2098,7 @@ impl Window {
     }
 
     pub fn content_rect(&self) -> Rect {
-        self.app.content_rect()
+        self.app.content_rect_for(self.id.into_raw() as i64)
     }
 
     pub fn openharmony_app(&self) -> &OpenHarmonyApp {
@@ -1100,13 +2110,13 @@ impl Window {
     pub fn raw_window_handle_rwh_06(&self) -> Result<rwh_06::RawWindowHandle, rwh_06::HandleError> {
         if let Some(handle) = self
             .app
-            .native_window()
+            .native_window_for(self.id.into_raw() as i64)
             .and_then(|window| window.raw_window_handle())
         {
             return Ok(handle);
         }
 
-        tracing::error!(
+        tracing::trace!(
             "The OHOS native window is only available between can_create_surfaces and \
              destroy_surfaces callbacks"
         );
@@ -1117,6 +2127,21 @@ impl Window {
         Ok(rwh_06::RawDisplayHandle::Ohos(
             rwh_06::OhosDisplayHandle::new(),
         ))
+    }
+}
+
+impl Drop for Window {
+    fn drop(&mut self) {
+        if !self.owns_window {
+            return;
+        }
+        if self.id == GLOBAL_WINDOW {
+            self.root_claimed.store(false, Ordering::Release);
+        } else {
+            self.command("destroy window", |client, _, id| async move {
+                client.destroy_window(id).await
+            });
+        }
     }
 }
 
@@ -1140,19 +2165,32 @@ impl CoreWindow for Window {
     }
 
     fn id(&self) -> WindowId {
-        GLOBAL_WINDOW
+        self.id
     }
 
     fn primary_monitor(&self) -> Option<CoreMonitorHandle> {
-        None
+        crate::monitor::primary()
     }
 
     fn available_monitors(&self) -> Box<dyn Iterator<Item = CoreMonitorHandle>> {
-        Box::new(std::iter::empty())
+        Box::new(crate::monitor::all().into_iter())
     }
 
     fn current_monitor(&self) -> Option<CoreMonitorHandle> {
-        None
+        let id = self
+            .shared
+            .lock()
+            .real_window_id
+            .and_then(|id| {
+                ohos_window_manager_binding::Window::from_id(id)
+                    .properties()
+                    .ok()
+            })
+            .map(|p| u64::from(p.display_id));
+        crate::monitor::all()
+            .into_iter()
+            .find(|monitor| Some(monitor.native_id()) == id)
+            .or_else(crate::monitor::primary)
     }
 
     fn scale_factor(&self) -> f64 {
@@ -1173,16 +2211,43 @@ impl CoreWindow for Window {
         Ok(self.shared.lock().position)
     }
 
-    fn set_outer_position(&self, _position: Position) {
-        // no effect
+    fn set_outer_position(&self, position: Position) {
+        let position = position.to_physical::<i32>(self.scale_factor());
+        self.command("move window", move |client, _, id| async move {
+            client
+                .move_window_to(id, position.x.into(), position.y.into())
+                .await
+        });
     }
 
     fn surface_size(&self) -> PhysicalSize<u32> {
         self.shared.lock().surface_size
     }
 
-    fn request_surface_size(&self, _size: Size) -> Option<PhysicalSize<u32>> {
-        Some(self.surface_size())
+    fn request_surface_size(&self, size: Size) -> Option<PhysicalSize<u32>> {
+        let size = size.to_physical::<u32>(self.scale_factor());
+        let state = self.shared.lock();
+        let border = PhysicalSize::new(
+            state
+                .outer_size
+                .width
+                .saturating_sub(state.surface_size.width),
+            state
+                .outer_size
+                .height
+                .saturating_sub(state.surface_size.height),
+        );
+        drop(state);
+        self.command("resize window", move |client, _, id| async move {
+            client
+                .resize_window(
+                    id,
+                    i64::from(size.width) + i64::from(border.width),
+                    i64::from(size.height) + i64::from(border.height),
+                )
+                .await
+        });
+        None
     }
 
     fn outer_size(&self) -> PhysicalSize<u32> {
@@ -1190,95 +2255,219 @@ impl CoreWindow for Window {
     }
 
     fn safe_area(&self) -> PhysicalInsets<u32> {
-        safe_area(&self.app)
+        if self.id == GLOBAL_WINDOW {
+            safe_area(&self.app)
+        } else {
+            PhysicalInsets::default()
+        }
     }
 
-    fn set_min_surface_size(&self, _: Option<Size>) {}
+    fn set_min_surface_size(&self, size: Option<Size>) {
+        let size = size.map(|size| size.to_physical(self.scale_factor()));
+        self.shared.lock().min_size = size;
+        self.apply_limits();
+    }
 
-    fn set_max_surface_size(&self, _: Option<Size>) {}
+    fn set_max_surface_size(&self, size: Option<Size>) {
+        let size = size.map(|size| size.to_physical(self.scale_factor()));
+        self.shared.lock().max_size = size;
+        self.apply_limits();
+    }
 
     fn surface_resize_increments(&self) -> Option<PhysicalSize<u32>> {
-        None
+        self.shared.lock().resize_increments
     }
 
-    fn set_surface_resize_increments(&self, _increments: Option<Size>) {}
+    fn set_surface_resize_increments(&self, increments: Option<Size>) {
+        let increments = increments.map(|size| size.to_physical(self.scale_factor()));
+        self.shared.lock().resize_increments = increments;
+    }
 
-    fn set_title(&self, _title: &str) {}
+    fn set_title(&self, title: &str) {
+        let title = title.to_owned();
+        self.command("window title", move |client, state, id| async move {
+            client.set_window_title(id, title.clone()).await?;
+            state.lock().title = title;
+            Ok(())
+        });
+    }
 
-    fn set_transparent(&self, _transparent: bool) {}
+    fn set_transparent(&self, transparent: bool) {
+        self.command("window background", move |client, _, id| async move {
+            client
+                .set_window_background_color(id, if transparent { 0 } else { 0xff000000 })
+                .await
+        });
+    }
 
-    fn set_blur(&self, _blur: bool) {}
+    fn set_blur(&self, blur: bool) {
+        self.command("window blur", move |client, _, id| async move {
+            client
+                .set_window_blur(id, if blur { 30.0 } else { 0.0 })
+                .await
+        });
+    }
 
-    fn set_visible(&self, _visibility: bool) {}
+    fn set_visible(&self, visible: bool) {
+        self.command("window visibility", move |client, _, id| async move {
+            if visible {
+                client.show_window(id).await
+            } else {
+                client.minimize_window(id).await
+            }
+        });
+    }
 
     fn is_visible(&self) -> Option<bool> {
         Some(self.shared.lock().visible)
     }
 
-    fn set_resizable(&self, _resizeable: bool) {}
+    fn set_resizable(&self, resizable: bool) {
+        self.shared.lock().resizable = resizable;
+        self.apply_buttons();
+    }
 
     fn is_resizable(&self) -> bool {
-        false
+        self.shared.lock().resizable
     }
 
-    fn set_enabled_buttons(&self, _buttons: WindowButtons) {}
+    fn set_enabled_buttons(&self, buttons: WindowButtons) {
+        self.shared.lock().enabled_buttons = buttons;
+        self.apply_buttons();
+    }
 
     fn enabled_buttons(&self) -> WindowButtons {
-        WindowButtons::all()
+        self.shared.lock().enabled_buttons
     }
 
-    fn set_minimized(&self, _minimized: bool) {}
+    fn set_minimized(&self, minimized: bool) {
+        self.command("minimize window", move |client, state, id| async move {
+            if minimized {
+                client.minimize_window(id).await?;
+            } else {
+                client.show_window(id).await?;
+            }
+            state.lock().minimized = minimized;
+            Ok(())
+        });
+    }
 
     fn is_minimized(&self) -> Option<bool> {
-        None
+        Some(self.shared.lock().minimized)
     }
 
-    fn set_maximized(&self, _maximized: bool) {}
+    fn set_maximized(&self, maximized: bool) {
+        self.command("maximize window", move |client, state, id| async move {
+            if maximized {
+                client.maximize_window(id).await?;
+            } else {
+                client.recover_window(id).await?;
+            }
+            state.lock().maximized = maximized;
+            Ok(())
+        });
+    }
 
     fn is_maximized(&self) -> bool {
-        false
+        self.shared.lock().maximized
     }
 
-    fn set_fullscreen(&self, _monitor: Option<Fullscreen>) {
-        warn!("Cannot set fullscreen on OpenHarmony");
+    fn set_fullscreen(&self, fullscreen: Option<Fullscreen>) {
+        self.command("fullscreen", move |client, state, id| async move {
+            client.set_fullscreen(id, fullscreen.is_some()).await?;
+            state.lock().fullscreen = fullscreen;
+            Ok(())
+        });
     }
 
     fn fullscreen(&self) -> Option<Fullscreen> {
-        None
+        self.shared.lock().fullscreen.clone()
     }
 
-    fn set_decorations(&self, _decorations: bool) {}
+    fn set_decorations(&self, decorations: bool) {
+        self.command("decorations", move |client, state, id| async move {
+            client.set_window_decorations(id, decorations).await?;
+            state.lock().decorations = decorations;
+            Ok(())
+        });
+    }
 
     fn is_decorated(&self) -> bool {
-        true
+        self.shared.lock().decorations
     }
 
-    fn set_window_level(&self, _level: WindowLevel) {}
+    fn set_window_level(&self, level: WindowLevel) {
+        self.command("window level", move |client, _, id| async move {
+            client
+                .set_window_topmost(id, level == WindowLevel::AlwaysOnTop)
+                .await
+        });
+    }
 
-    fn set_window_icon(&self, _window_icon: Option<winit_core::icon::Icon>) {}
-
-    fn set_ime_cursor_area(&self, _position: Position, _size: Size) {}
+    fn set_window_icon(&self, window_icon: Option<winit_core::icon::Icon>) {
+        if self.id != GLOBAL_WINDOW {
+            warn!("OHOS child windows share their Ability icon");
+            return;
+        }
+        let (size, rgba) = if let Some(icon) = window_icon {
+            let Some(icon) = icon.0.cast_ref::<winit_core::icon::RgbaIcon>() else {
+                return;
+            };
+            let size = icon.width().max(icon.height());
+            if size > 1024 {
+                warn!("OHOS window icon exceeds 1024 pixels");
+                return;
+            }
+            let mut rgba = vec![0; (size * size * 4) as usize];
+            let offset_x = (size - icon.width()) / 2;
+            let offset_y = (size - icon.height()) / 2;
+            for y in 0..icon.height() {
+                let start = ((y + offset_y) * size + offset_x) as usize * 4;
+                let source = (y * icon.width()) as usize * 4;
+                rgba[start..start + icon.width() as usize * 4]
+                    .copy_from_slice(&icon.buffer()[source..source + icon.width() as usize * 4]);
+            }
+            (size, rgba)
+        } else {
+            (0, Vec::new())
+        };
+        self.command("window icon", move |client, _, id| async move {
+            client
+                .set_window_icon(crate::plugins::window::WindowIconRequest {
+                    window_id: id,
+                    size,
+                    rgba,
+                })
+                .await
+        });
+    }
 
     fn request_ime_update(&self, request: ImeRequest) -> Result<(), ImeRequestError> {
         match request {
             ImeRequest::Enable(enable) => {
-                let (capabilities, _) = enable.into_raw();
+                let (capabilities, data) = enable.into_raw();
                 let mut state = self.shared.lock();
                 if state.ime_capabilities.is_some() {
                     return Err(ImeRequestError::AlreadyEnabled);
                 }
                 state.ime_capabilities = Some(capabilities);
                 drop(state);
-                self.app.show_keyboard();
+                self.update_ime(data);
+                if let Err(error) = self.app.try_show_keyboard_for(self.id.into_raw() as i64) {
+                    self.shared.lock().ime_capabilities = None;
+                    warn!("Cannot show OHOS keyboard: {error}");
+                    return Err(ImeRequestError::NotSupported);
+                }
             }
-            ImeRequest::Update(_) => {
+            ImeRequest::Update(data) => {
                 if self.shared.lock().ime_capabilities.is_none() {
                     return Err(ImeRequestError::NotEnabled);
                 }
+                self.update_ime(data);
             }
             ImeRequest::Disable => {
                 self.shared.lock().ime_capabilities = None;
-                self.app.hide_keyboard();
+                self.app.hide_keyboard_for(self.id.into_raw() as i64);
             }
             _ => return Err(ImeRequestError::NotSupported),
         }
@@ -1290,53 +2479,196 @@ impl CoreWindow for Window {
         self.shared.lock().ime_capabilities
     }
 
-    fn set_ime_purpose(&self, _purpose: ImePurpose) {}
+    fn focus_window(&self) {
+        self.command("focus window", |client, _, id| async move {
+            client.focus_window(id).await
+        });
+    }
 
-    fn focus_window(&self) {}
+    fn request_user_attention(&self, request_type: Option<window::UserAttentionType>) {
+        if request_type.is_some() {
+            self.command("request attention", |client, _, id| async move {
+                client.request_user_attention(id).await
+            });
+        }
+    }
 
-    fn request_user_attention(&self, _request_type: Option<window::UserAttentionType>) {}
-
-    fn set_cursor(&self, _: Cursor) {}
+    fn set_cursor(&self, cursor: Cursor) {
+        if let Cursor::Custom(custom) = &cursor
+            && let Some(image) = custom.0.cast_ref::<crate::cursor::ImageCursor>()
+        {
+            let image = image.0.clone();
+            self.command("custom cursor", move |client, _, id| async move {
+                client
+                    .set_custom_cursor(crate::plugins::window::CustomCursorRequest {
+                        window_id: id,
+                        rgba: image.buffer().to_vec(),
+                        width: u32::from(image.width()),
+                        height: u32::from(image.height()),
+                        hotspot_x: u32::from(image.hotspot_x()),
+                        hotspot_y: u32::from(image.hotspot_y()),
+                    })
+                    .await
+            });
+        }
+        if let Cursor::Icon(icon) = cursor {
+            let style = crate::cursor::style(icon);
+            self.command("cursor icon", move |client, _, id| async move {
+                client.set_cursor_icon(id, style).await
+            });
+        }
+    }
 
     fn set_cursor_position(&self, _: Position) -> Result<(), RequestError> {
         Err(NotSupportedError::new("set_cursor_position is not supported").into())
     }
 
-    fn set_cursor_grab(&self, _: CursorGrabMode) -> Result<(), RequestError> {
-        Err(NotSupportedError::new("set_cursor_grab is not supported").into())
+    fn set_cursor_grab(&self, mode: CursorGrabMode) -> Result<(), RequestError> {
+        let id = self.shared.lock().real_window_id.ok_or_else(|| {
+            RequestError::NotSupported(NotSupportedError::new("OHOS window id is not ready"))
+        })?;
+        let window = ohos_window_manager_binding::Window::from_id(id);
+        let result = match mode {
+            CursorGrabMode::None => window.unlock_cursor(),
+            CursorGrabMode::Confined => window.lock_cursor(true),
+            CursorGrabMode::Locked => window.lock_cursor(false),
+        };
+        result.map_err(|error| {
+            RequestError::Os(OsError::new(
+                line!(),
+                file!(),
+                std::io::Error::other(error.to_string()),
+            ))
+        })
     }
 
-    fn set_cursor_visible(&self, _: bool) {}
+    fn set_cursor_visible(&self, visible: bool) {
+        self.command("cursor visibility", move |client, _, _id| async move {
+            client.set_cursor_visible(visible).await
+        });
+    }
 
     fn drag_window(&self) -> Result<(), RequestError> {
-        Err(NotSupportedError::new("drag_window is not supported").into())
+        let mut state = self.shared.lock();
+        state.dragging = Some(WindowDrag {
+            direction: None,
+            pointer: PhysicalPosition::new(
+                state.pointer_position.x + f64::from(state.position.x),
+                state.pointer_position.y + f64::from(state.position.y),
+            ),
+            position: state.position,
+            size: state.surface_size,
+        });
+        Ok(())
     }
 
-    fn drag_resize_window(&self, _direction: ResizeDirection) -> Result<(), RequestError> {
-        Err(NotSupportedError::new("drag_resize_window").into())
+    fn drag_resize_window(&self, direction: ResizeDirection) -> Result<(), RequestError> {
+        if !self.is_resizable() {
+            return Err(NotSupportedError::new("window is not resizable").into());
+        }
+        self.drag_window()?;
+        if let Some(drag) = &mut self.shared.lock().dragging {
+            drag.direction = Some(direction);
+        }
+        Ok(())
     }
 
-    #[inline]
-    fn show_window_menu(&self, _position: Position) {}
-
-    fn set_cursor_hittest(&self, _hittest: bool) -> Result<(), RequestError> {
-        Err(NotSupportedError::new("set_cursor_hittest is not supported").into())
+    fn show_window_menu(&self, position: Position) {
+        use crate::plugins::window::{WindowClient, WindowPromptAnchor, WindowPromptRequest};
+        let position = position.to_logical::<f64>(self.scale_factor());
+        let app = self.app.clone();
+        let id = self.id.into_raw() as i64;
+        let maximized = self.is_maximized();
+        let fullscreen = self.fullscreen().is_some();
+        crate::task::spawn(async move {
+            let result = async {
+                let client = WindowClient::new(&app)?;
+                let selected = client
+                    .show_prompt(WindowPromptRequest {
+                        window_id: id,
+                        message: "Window".into(),
+                        detail: None,
+                        level: 0,
+                        buttons: vec![
+                            "Minimize".into(),
+                            if maximized { "Restore" } else { "Maximize" }.into(),
+                            if fullscreen {
+                                "Leave fullscreen"
+                            } else {
+                                "Fullscreen"
+                            }
+                            .into(),
+                            "Close".into(),
+                            "Cancel".into(),
+                        ],
+                        cancel_index: Some(4),
+                        anchor: Some(WindowPromptAnchor {
+                            x: position.x.max(0.0),
+                            y: position.y.max(0.0),
+                        }),
+                    })
+                    .await?;
+                match selected {
+                    0 => client.minimize_window(id).await?,
+                    1 if maximized => client.restore_window(id).await?,
+                    1 => client.maximize_window(id).await?,
+                    2 => client.set_fullscreen(id, !fullscreen).await?,
+                    3 => {
+                        openharmony_ability::notify_window_close(id as i32);
+                        app.create_waker().wake();
+                    }
+                    _ => {}
+                }
+                Ok::<_, openharmony_ability::napi_ohos::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                warn!("OHOS window menu: {error}");
+            }
+        });
     }
 
-    fn set_theme(&self, _theme: Option<Theme>) {}
+    fn set_cursor_hittest(&self, hittest: bool) -> Result<(), RequestError> {
+        self.command("cursor hit test", move |client, _, id| async move {
+            client.set_window_touchable(id, hittest).await
+        });
+        Ok(())
+    }
+
+    fn set_theme(&self, theme: Option<Theme>) {
+        use crate::plugins::app_control::{
+            AppControlBridgePlugin, SetColorModeRequest, SetColorModeResponse,
+        };
+        let bridge = self.app.bridge();
+        crate::task::spawn(async move {
+            let result = async { bridge?.call_sync_from_worker::<AppControlBridgePlugin, SetColorModeRequest, SetColorModeResponse>("set-color-mode", SetColorModeRequest { color_mode: match theme { Some(Theme::Dark) => 0, Some(Theme::Light) => 1, None => 2 } }).await }.await;
+            if let Err(error) = result {
+                warn!("OHOS color mode: {error}");
+            }
+        });
+    }
 
     fn theme(&self) -> Option<Theme> {
         self.shared.lock().theme
     }
 
-    fn set_content_protected(&self, _protected: bool) {}
+    fn set_content_protected(&self, protected: bool) {
+        self.command("content protection", move |client, _, id| async move {
+            let id = client.get_real_window_id(id).await?;
+            ohos_window_manager_binding::Window::from_id(id as i32)
+                .set_privacy_mode(protected)
+                .map_err(|error| {
+                    openharmony_ability::napi_ohos::Error::from_reason(error.to_string())
+                })
+        });
+    }
 
     fn has_focus(&self) -> bool {
         self.shared.lock().focused
     }
 
     fn title(&self) -> String {
-        String::new()
+        self.shared.lock().title.clone()
     }
 
     fn reset_dead_keys(&self) {}
@@ -1429,15 +2761,34 @@ fn safe_area(app: &OpenHarmonyApp) -> PhysicalInsets<u32> {
     let mut left = 0;
     let mut bottom = 0;
     let mut right = 0;
+    let content = app.content_rect();
+    let vertical = |rect: Rect| {
+        if rect.width <= 0
+            || i64::from(rect.left) >= i64::from(content.left) + i64::from(content.width)
+            || i64::from(rect.left) + i64::from(rect.width) <= i64::from(content.left)
+        {
+            return (0, 0);
+        }
+        crate::safe_area::edge_insets(content.top, content.height, rect.top, rect.height)
+    };
+    let horizontal = |rect: Rect| {
+        if rect.height <= 0
+            || i64::from(rect.top) >= i64::from(content.top) + i64::from(content.height)
+            || i64::from(rect.top) + i64::from(rect.height) <= i64::from(content.top)
+        {
+            return (0, 0);
+        }
+        crate::safe_area::edge_insets(content.left, content.width, rect.left, rect.width)
+    };
 
     for (area_type, area) in app.avoid_areas() {
         if !area.visible || matches!(area_type, AvoidAreaType::Keyboard) {
             continue;
         }
-        top = top.max(nonnegative_u32(area.top_rect.height));
-        left = left.max(nonnegative_u32(area.left_rect.width));
-        bottom = bottom.max(nonnegative_u32(area.bottom_rect.height));
-        right = right.max(nonnegative_u32(area.right_rect.width));
+        top = top.max(vertical(area.top_rect).0);
+        left = left.max(horizontal(area.left_rect).0);
+        bottom = bottom.max(vertical(area.bottom_rect).1);
+        right = right.max(horizontal(area.right_rect).1);
     }
 
     PhysicalInsets::new(top, left, bottom, right)

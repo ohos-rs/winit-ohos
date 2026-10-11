@@ -11,9 +11,16 @@
 //!
 #![cfg(target_env = "ohos")]
 
+mod cursor;
+pub mod drag_drop;
 mod event_loop;
+pub mod events;
+pub mod file_access;
 mod keycodes;
+mod monitor;
 pub mod plugins;
+mod safe_area;
+pub mod task;
 
 use winit_core::event_loop::ActiveEventLoop as CoreActiveEventLoop;
 use winit_core::window::Window as CoreWindow;
@@ -52,6 +59,10 @@ pub trait WindowExtOpenHarmony {
     /// This can be used with the optional `plugins::window` facade or plugins owned by the app.
     fn openharmony_app(&self) -> &OpenHarmonyApp;
 
+    /// Consume native IME edits accompanying an `Ime::Enabled` notification.
+    /// Selection and deletion offsets use UTF-16, as required by the OHOS IME.
+    fn take_ime_edits(&self) -> Vec<ImeEdit>;
+
     fn content_rect(&self) -> Rect;
 
     fn config(&self) -> Configuration;
@@ -63,6 +74,12 @@ impl WindowExtOpenHarmony for dyn CoreWindow + '_ {
             .cast_ref::<Window>()
             .expect("Window is not backed by winit-ohos");
         window.openharmony_app()
+    }
+
+    fn take_ime_edits(&self) -> Vec<ImeEdit> {
+        self.cast_ref::<Window>()
+            .expect("OHOS window")
+            .take_ime_edits()
     }
 
     fn content_rect(&self) -> Rect {
@@ -116,3 +133,12 @@ pub mod ability {
     #[doc(no_inline)]
     pub use openharmony_ability_derive::*;
 }
+
+/// Edits absent from winit's cross-platform IME event vocabulary.
+#[derive(Debug, Clone)]
+pub enum ImeEdit {
+    Selection { start: usize, end: usize },
+    DeleteSurrounding { before: usize, after: usize },
+}
+
+mod stylus;
