@@ -70,7 +70,12 @@ fn query() -> Vec<MonitorHandle> {
             .iter()
             .filter(|d| d.isAlive)
             .map(|d| {
-                let name: Vec<_> = d.name.iter().take_while(|c| **c != 0).copied().collect();
+                let name: Vec<_> = d
+                    .name
+                    .iter()
+                    .take_while(|c| **c != 0)
+                    .map(|c| c.to_ne_bytes()[0])
+                    .collect();
                 MonitorHandle(Arc::new(Monitor {
                     id: d.id,
                     name: String::from_utf8_lossy(&name).into_owned(),
