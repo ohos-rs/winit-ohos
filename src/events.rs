@@ -51,7 +51,7 @@ pub(crate) fn register_plugins(app: &openharmony_ability::OpenHarmonyApp) {
         menu::register_menu_event_sender(menu_tx);
         menu::register_menu_open_event_sender(open_tx);
         system_state::register_system_state_event_sender(state_tx);
-        let app = app.clone();
+        let wake = crate::frame::main_wake(app);
         // These plugin callbacks run on ArkTS's thread. Receive elsewhere and wake
         // the event loop; never synchronously invoke egui or a bridge in a callback.
         std::thread::Builder::new()
@@ -65,11 +65,12 @@ pub(crate) fn register_plugins(app: &openharmony_ability::OpenHarmonyApp) {
                     };
                     let Some(event) = event else { break };
                     emit(event);
-                    app.create_waker().wake();
+                    wake.notify();
                 }
             })
             .expect("create OHOS platform event thread");
     });
+    let wake = crate::frame::main_wake(app);
     let app = app.clone();
     crate::task::spawn(async move {
         let result = async {
@@ -77,7 +78,7 @@ pub(crate) fn register_plugins(app: &openharmony_ability::OpenHarmonyApp) {
             client
                 .subscribe_state_change(move |enabled| {
                     emit(PlatformEvent::ScreenReader(enabled));
-                    app.create_waker().wake();
+                    wake.notify();
                 })
                 .await
         }

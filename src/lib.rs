@@ -11,16 +11,25 @@
 //!
 #![cfg(target_env = "ohos")]
 
+mod control_flow;
 mod cursor;
 pub mod drag_drop;
 mod event_loop;
 pub mod events;
 pub mod file_access;
+mod frame;
+mod frame_request;
+mod geometry;
 mod keycodes;
+mod main_wake;
 mod monitor;
 pub mod plugins;
+mod resize_settle;
 mod safe_area;
 pub mod task;
+mod timer;
+mod window_lifecycle;
+mod window_status;
 
 use winit_core::event_loop::ActiveEventLoop as CoreActiveEventLoop;
 use winit_core::window::Window as CoreWindow;

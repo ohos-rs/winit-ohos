@@ -328,7 +328,7 @@ pub fn start_file_drag_with_options(
                 }
             }
         });
-        app.create_waker().wake();
+        crate::frame::main_wake(&app).notify();
     });
     if dispatched.is_err() {
         cancel_outgoing(Some(source));

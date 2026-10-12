@@ -25,6 +25,7 @@ openharmony-ability-plugin-window = { version = "1.0.0-beta.1", git = "https://g
 futures-executor = { version = "0.3", features = ["thread-pool"] }
 futures-channel = "0.3"
 ohos-fileuri-binding = "0.1"
+ohos-vsync-binding = "0.3"
 ohos-fileshare-binding = "0.2.4"
 openharmony-ability-plugin-clipboard = { version = "1.0.0-beta.0", git = "https://github.com/richerfu/openharmony-ability.git", rev = "d8cf549505fca3ea39d4a56cb58334a85a6d1dc6" }
 openharmony-ability-plugin-url = { version = "1.0.0-beta.1", git = "https://github.com/richerfu/openharmony-ability.git", rev = "d8cf549505fca3ea39d4a56cb58334a85a6d1dc6" }

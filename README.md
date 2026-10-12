@@ -75,9 +75,32 @@ fn openharmony_app(app: OpenHarmonyApp) {
 The backend translates Ability lifecycle, surface geometry, safe areas, configuration,
 XComponent touch/mouse/key input, ArkUI axis/gesture input and IME callbacks into
 winit events. `run_app` registers callbacks and returns to the Ability main loop.
-`request_redraw` and `EventLoopProxy::wake_up` queue Ability main-thread work;
-`ControlFlow` determines the next callback's `StartCause`. The platform owns the
-loop, so `run_app_on_demand` and `pump_app_events` are unsupported.
+`request_redraw` schedules an on-demand NativeVSync tick for each presentable window;
+Ability uses `FrameInputDelivery::OnDemand` while NativeVSync is healthy. Creation or
+request failure falls back to `Continuous`, which redraws only when requested.
+Main-thread wakes are coalesced. Lifecycle and input callbacks request a future frame;
+presentation happens after event and data-transfer delivery in a frame iteration.
+Background and minimized windows retain redraw demand until they become presentable.
+OHOS EGL buffer geometry can lag behind XComponent size callbacks, so size changes
+and surface creation redraw every display frame for 200 ms.
+
+`ControlFlow::Poll` follows display refreshes. With no presentable window it behaves
+like `Wait` until another platform event arrives. `WaitUntil` uses a timer thread
+that sleeps until the selected deadline. `ControlFlow` also determines the next
+callback's `StartCause`. The platform owns the loop, so `run_app_on_demand` and
+`pump_app_events` are unsupported.
+
+A child surface can be destroyed and recreated without closing its window. The
+backend calls `can_create_surfaces` again on recreation; applications must recreate
+that window's rendering surface because the old native window handle is invalid.
+Native child closure delivers `CloseRequested` followed by `Destroyed` once; dropping
+a child from the application delivers only `Destroyed`. Root close requests remain
+for the application to decide.
+
+Ability `Destroy` releases rendering surfaces, delivers `Destroyed` to children and
+then the root, drops the application handler, and requests process termination.
+The `#[ability]` initializer runs only once per process; a destroyed event loop
+cannot resume if the system rebuilds the Ability in a cached process.
 
 ## Platform capabilities
 
