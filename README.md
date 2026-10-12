@@ -93,11 +93,13 @@ surface readiness before their queued configuration runs. Clipboard reads and fi
 pickers also run asynchronously; never block the Ability UI thread waiting for a
 bridge future. Use `task::spawn` and request a repaint when a result arrives.
 `events::subscribe` delivers Want, menu, system-state and screen-reader events.
-The `file_access` module persists and activates picker grants before Rust filesystem
-access. Native file drags support Copy/Move, owned RGBA previews and actual OS completion
-results, retaining their source/data until completion. Pen pressure, tilt, twist
-and eraser metadata are forwarded as tablet-tool events. Static custom cursors
-and API 22+ 2in1 Ability window icons use typed window-plugin requests.
+The `file_access` module resolves picker URIs to absolute paths and attempts to persist
+and activate grants using `ohos.permission.FILE_ACCESS_PERSIST`. Authorization failures
+are logged without discarding valid selections; activation is attempted only for
+successfully persisted grants. Native file drags support Copy/Move, owned RGBA previews
+and actual OS completion results, retaining their source/data until completion. Pen
+pressure, tilt, twist and eraser metadata are forwarded as tablet-tool events. Static
+custom cursors and API 22+ 2in1 Ability window icons use typed window-plugin requests.
 
 Applications select this backend through a workspace-root patch while these changes
 are unpublished:
