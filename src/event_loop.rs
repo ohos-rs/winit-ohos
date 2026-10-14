@@ -72,6 +72,7 @@ struct InputState {
     pending_touch: Option<TouchEventData>,
     pen_metadata: Option<openharmony_ability::StylusInputData>,
     mouse_inside: bool,
+    pressed_mouse_buttons: Vec<ButtonSource>,
     modifiers: ModifiersState,
     modifier_keys: ModifiersKeys,
 }
@@ -1038,7 +1039,10 @@ impl EventLoop {
         let position = PhysicalPosition::new(mouse_event.x as f64, mouse_event.y as f64);
         self.update_window_drag(
             position,
-            matches!(mouse_event.action, OhosMouseAction::Release),
+            matches!(
+                mouse_event.action,
+                OhosMouseAction::Release | OhosMouseAction::Cancel
+            ),
         );
 
         match mouse_event.action {
@@ -1059,23 +1063,55 @@ impl EventLoop {
                     source: PointerSource::Mouse,
                 },
             ),
-            OhosMouseAction::Press | OhosMouseAction::Release => app.window_event(
-                &self.window_target,
-                self.current_window,
-                event::WindowEvent::PointerButton {
-                    device_id,
-                    state: if matches!(mouse_event.action, OhosMouseAction::Press) {
-                        ElementState::Pressed
-                    } else {
-                        ElementState::Released
+            OhosMouseAction::Press | OhosMouseAction::Release => {
+                let button = map_mouse_button(mouse_event.button);
+                let pressed = matches!(mouse_event.action, OhosMouseAction::Press);
+                let buttons = &mut self.input.pressed_mouse_buttons;
+                if pressed {
+                    if !buttons.contains(&button) {
+                        buttons.push(button.clone());
+                    }
+                } else {
+                    buttons.retain(|pressed| pressed != &button);
+                }
+                app.window_event(
+                    &self.window_target,
+                    self.current_window,
+                    event::WindowEvent::PointerButton {
+                        device_id,
+                        state: if pressed {
+                            ElementState::Pressed
+                        } else {
+                            ElementState::Released
+                        },
+                        position,
+                        primary: true,
+                        button,
+                        is_macos_activation_click: false,
                     },
-                    position,
-                    primary: true,
-                    button: map_mouse_button(mouse_event.button),
-                    is_macos_activation_click: false,
-                },
-            ),
-            _ => trace!("Ignoring an OHOS mouse event with no actionable state"),
+                );
+            }
+            // The system took over the mouse stream (for example a native drag);
+            // no Release follows, so end every press the app still considers held.
+            OhosMouseAction::Cancel => {
+                for button in std::mem::take(&mut self.input.pressed_mouse_buttons) {
+                    app.window_event(
+                        &self.window_target,
+                        self.current_window,
+                        event::WindowEvent::PointerButton {
+                            device_id,
+                            state: ElementState::Released,
+                            position,
+                            primary: true,
+                            button,
+                            is_macos_activation_click: false,
+                        },
+                    );
+                }
+            }
+            OhosMouseAction::None => {
+                trace!("Ignoring an OHOS mouse event with no actionable state")
+            }
         }
     }
 
