@@ -20,6 +20,7 @@ pub mod file_access;
 mod frame;
 mod frame_demand;
 mod geometry;
+mod ime_text;
 mod keycodes;
 mod main_wake;
 mod monitor;
@@ -68,8 +69,15 @@ pub trait WindowExtOpenHarmony {
     /// This can be used with the optional `plugins::window` facade or plugins owned by the app.
     fn openharmony_app(&self) -> &OpenHarmonyApp;
 
-    /// Consume native IME edits accompanying an `Ime::Enabled` notification.
+    /// Consume native IME edits announced by a `WindowEvent::Ime` notification.
     /// Selection and deletion offsets use UTF-16, as required by the OHOS IME.
+    ///
+    /// The first call opts this window into native edits. Afterwards, OHOS selection
+    /// changes and deletions are queued here, and the announcing event is
+    /// `Ime::DeleteSurrounding` when the byte counts are known or `Ime::Enabled`
+    /// otherwise, so call this on every IME event. Until then, selection changes are
+    /// ignored and deletions arrive as `Ime::DeleteSurrounding` (when surrounding text
+    /// was reported) or as Backspace/Delete key presses.
     fn take_ime_edits(&self) -> Vec<ImeEdit>;
 
     fn content_rect(&self) -> Rect;

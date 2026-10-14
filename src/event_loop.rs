@@ -138,6 +138,9 @@ struct WindowState {
     dragging: Option<WindowDrag>,
     resize_increments: Option<PhysicalSize<u32>>,
     ime_edits: Vec<crate::ImeEdit>,
+    /// Set once the application calls `take_ime_edits`; until then no edits are queued.
+    native_ime_edits: bool,
+    ime_surrounding: Option<crate::ime_text::SurroundingText>,
 }
 
 impl SharedWindowState {
@@ -198,6 +201,8 @@ impl SharedWindowState {
                 dragging: None,
                 resize_increments: None,
                 ime_edits: Vec::new(),
+                native_ime_edits: false,
+                ime_surrounding: None,
             }),
         }
     }
@@ -409,21 +414,10 @@ impl EventLoop {
                         );
                     }
                     ImeEvent::BackspaceEvent(count) | ImeEvent::DeleteForwardEvent(count) => {
-                        let count = (*count).max(0) as usize;
-                        let (before, after) = if matches!(data, ImeEvent::BackspaceEvent(_)) {
-                            (count, 0)
-                        } else {
-                            (0, count)
-                        };
-                        self.window_target
-                            .shared
-                            .lock()
-                            .ime_edits
-                            .push(crate::ImeEdit::DeleteSurrounding { before, after });
-                        app.window_event(
-                            &self.window_target,
-                            self.current_window,
-                            event::WindowEvent::Ime(Ime::Enabled),
+                        self.handle_ime_deletion(
+                            matches!(data, ImeEvent::BackspaceEvent(_)),
+                            (*count).max(0) as usize,
+                            app,
                         );
                     }
                     ImeEvent::PreviewTextEvent { text, .. } => app.window_event(
@@ -487,12 +481,17 @@ impl EventLoop {
                         }
                     }
                     ImeEvent::SelectionEvent { start, end } => {
-                        self.window_target.shared.lock().ime_edits.push(
-                            crate::ImeEdit::Selection {
-                                start: (*start).max(0) as usize,
-                                end: (*end).max(0) as usize,
-                            },
-                        );
+                        let mut state = self.window_target.shared.lock();
+                        if !state.native_ime_edits {
+                            // winit has no portable selection event.
+                            trace!("Ignoring an OHOS IME selection without a native edit consumer");
+                            return;
+                        }
+                        state.ime_edits.push(crate::ImeEdit::Selection {
+                            start: (*start).max(0) as usize,
+                            end: (*end).max(0) as usize,
+                        });
+                        drop(state);
                         app.window_event(
                             &self.window_target,
                             self.current_window,
@@ -502,7 +501,10 @@ impl EventLoop {
                     ImeEvent::EnterEvent(_) => self.emit_synthetic_key(Keycode::Enter, app),
                     ImeEvent::ImeStatusEvent(status) => match status {
                         KeyboardStatus::Hide => {
-                            self.window_target.shared.lock().ime_capabilities = None;
+                            let mut state = self.window_target.shared.lock();
+                            state.ime_capabilities = None;
+                            state.ime_surrounding = None;
+                            drop(state);
                             app.window_event(
                                 &self.window_target,
                                 self.current_window,
@@ -1157,6 +1159,58 @@ impl EventLoop {
                 primary: true,
                 kind: PointerKind::Mouse,
             },
+        );
+    }
+
+    fn handle_ime_deletion<A: ApplicationHandler>(
+        &mut self,
+        backward: bool,
+        count: usize,
+        app: &mut A,
+    ) {
+        if count == 0 {
+            return;
+        }
+        let (before, after) = if backward { (count, 0) } else { (0, count) };
+        let (bytes, native) = {
+            let mut state = self.window_target.shared.lock();
+            let bytes = state
+                .ime_surrounding
+                .as_mut()
+                .and_then(|text| text.delete(before, after));
+            if state.native_ime_edits {
+                state
+                    .ime_edits
+                    .push(crate::ImeEdit::DeleteSurrounding { before, after });
+            }
+            (bytes, state.native_ime_edits)
+        };
+        let ime = match bytes {
+            Some((before_bytes, after_bytes)) => Ime::DeleteSurrounding {
+                before_bytes,
+                after_bytes,
+            },
+            // Native edit consumers drain `take_ime_edits` on every IME event.
+            None if native => Ime::Enabled,
+            None => {
+                // Without surrounding text the deletion extent is unknown, and editors
+                // such as terminals have no backing text at all. Key presses let the
+                // application apply its own deletion rules.
+                let key = if backward {
+                    Keycode::Del
+                } else {
+                    Keycode::ForwardDel
+                };
+                for _ in 0..count {
+                    self.emit_synthetic_key(key, app);
+                }
+                return;
+            }
+        };
+        app.window_event(
+            &self.window_target,
+            self.current_window,
+            event::WindowEvent::Ime(ime),
         );
     }
 
@@ -2502,12 +2556,19 @@ impl Window {
     fn update_ime(&self, data: window::ImeRequestData) {
         use openharmony_ability::ime::{EnterKey, InputType, Rect};
         if let Some(text) = data.surrounding_text {
-            let cursor = text.text()[..text.cursor()].encode_utf16().count();
-            let anchor = text.text()[..text.anchor()].encode_utf16().count();
+            let (cursor_byte, anchor_byte) = (text.cursor(), text.anchor());
+            let text = text.into_text();
+            let cursor = text[..cursor_byte].encode_utf16().count();
+            let anchor = text[..anchor_byte].encode_utf16().count();
+            self.shared.lock().ime_surrounding = Some(crate::ime_text::SurroundingText::new(
+                text.clone(),
+                cursor_byte,
+                anchor_byte,
+            ));
             let _ = self.app.update_ime_text_state_for(
                 self.id.into_raw() as i64,
                 openharmony_ability::ime::TextState {
-                    text: text.into_text(),
+                    text,
                     offset: 0,
                     selection: cursor.min(anchor)..cursor.max(anchor),
                     reversed: cursor < anchor,
@@ -2562,7 +2623,9 @@ impl Window {
     }
 
     pub fn take_ime_edits(&self) -> Vec<crate::ImeEdit> {
-        std::mem::take(&mut self.shared.lock().ime_edits)
+        let mut state = self.shared.lock();
+        state.native_ime_edits = true;
+        std::mem::take(&mut state.ime_edits)
     }
 
     pub fn config(&self) -> Configuration {
@@ -2939,6 +3002,7 @@ impl CoreWindow for Window {
                     return Err(ImeRequestError::AlreadyEnabled);
                 }
                 state.ime_capabilities = Some(capabilities);
+                state.ime_surrounding = None;
                 drop(state);
                 self.update_ime(data);
                 if let Err(error) = self.app.try_show_keyboard_for(self.id.into_raw() as i64) {
@@ -2954,7 +3018,10 @@ impl CoreWindow for Window {
                 self.update_ime(data);
             }
             ImeRequest::Disable => {
-                self.shared.lock().ime_capabilities = None;
+                let mut state = self.shared.lock();
+                state.ime_capabilities = None;
+                state.ime_surrounding = None;
+                drop(state);
                 self.app.hide_keyboard_for(self.id.into_raw() as i64);
             }
             _ => return Err(ImeRequestError::NotSupported),
