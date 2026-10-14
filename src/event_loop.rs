@@ -333,7 +333,29 @@ impl EventLoop {
         match event {
             InputEvent::XComponent(event) => match event {
                 XComponentInputEvent::Touch(motion_event) => {
-                    self.input.pending_touch = Some(motion_event.clone());
+                    let mouse_tool = motion_event
+                        .touch_points
+                        .iter()
+                        .find(|point| point.id == motion_event.id)
+                        .is_some_and(|point| {
+                            point.event_tool_type
+                                == openharmony_ability::xcomponent::TouchPointTool::Mouse
+                        });
+                    if mouse_tool {
+                        trace!(
+                            "Ignoring a mouse-emulated OHOS touch; the mouse callback reports it"
+                        );
+                    } else {
+                        self.input.pending_touch = Some(motion_event.clone());
+                        // ArkUI metadata normally follows in the same input dispatch. If
+                        // it does not, the next frame turn delivers the touch on its own.
+                        let shared = &self.window_target.shared;
+                        if shared.lock().presentable() {
+                            shared.frame.request();
+                        } else {
+                            self.window_target.main_wake.notify();
+                        }
+                    }
                 }
                 XComponentInputEvent::Mouse(mouse_event) => {
                     self.handle_mouse_event(mouse_event, app);
@@ -1452,12 +1474,34 @@ impl EventLoop {
             let due = {
                 let state = shared.lock();
                 state.redraw_pending && state.presentable()
-            };
+            } || (id == self.current_window && self.input.pending_touch.is_some());
             // Idle callbacks only count toward unregistration; they must not run a
             // full application iteration on every vsync.
             if !due && !matches!(self.window_target.control_flow(), ControlFlow::Poll) {
                 return;
             }
+        }
+
+        let user_turn = matches!(&event, MainEvent::UserEvent);
+        let cause = if self.loop_running {
+            start_cause(self.window_target.control_flow(), self.wait_started)
+        } else {
+            self.loop_running = true;
+            StartCause::Init
+        };
+        let proxy_wake_up = user_turn && self.window_target.event_loop_proxy.take_wake_up();
+        app.new_events(&self.window_target, cause);
+
+        // A raw touch waits for the ArkUI metadata event that follows it in the same
+        // input dispatch. Any other turn means that metadata is not coming.
+        let input_turn = matches!(
+            &event,
+            MainEvent::Input(_) | MainEvent::SubWindowInput { .. }
+        );
+        if !(input_turn && id == self.current_window)
+            && let Some(touch) = self.input.pending_touch.take()
+        {
+            self.handle_touch_event(&touch, app);
         }
         if let Some(shared) = shared {
             if self.current_window != id {
@@ -1477,15 +1521,6 @@ impl EventLoop {
             self.window_target.shared = shared;
         }
 
-        let user_turn = matches!(&event, MainEvent::UserEvent);
-        let cause = if self.loop_running {
-            start_cause(self.window_target.control_flow(), self.wait_started)
-        } else {
-            self.loop_running = true;
-            StartCause::Init
-        };
-        let proxy_wake_up = user_turn && self.window_target.event_loop_proxy.take_wake_up();
-        app.new_events(&self.window_target, cause);
         for (id, status) in openharmony_ability::drain_pending_window_status() {
             let Some(status) = crate::window_status::window_status(status) else {
                 warn!("Ignoring invalid OHOS window status: {status}");
