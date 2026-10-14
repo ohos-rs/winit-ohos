@@ -62,6 +62,7 @@ pub struct EventLoop {
     input: InputState,
     input_states: HashMap<WindowId, InputState>,
     wait_started: Instant,
+    fallback_deadline: Option<Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -203,15 +204,16 @@ impl SharedWindowState {
     fn request_redraw(&self) {
         let mut state = self.lock();
         state.redraw_pending = true;
-        if state.presentable() && self.frame.healthy() {
-            self.frame.request_frame();
+        if state.presentable() {
+            self.frame.request();
         }
     }
 
     fn sync_active(&self, state: &WindowState) {
-        self.frame.set_active(state.presentable());
+        self.frame
+            .sync(state.presentable(), state.lifecycle.surface_available);
         if state.presentable() && state.redraw_pending {
-            self.frame.request_frame();
+            self.frame.request();
         }
     }
 
@@ -270,8 +272,7 @@ impl EventLoop {
 
         let event_loop_proxy = Arc::new(EventLoopProxy::new(openharmony_app.clone()));
         let shared = Arc::new(SharedWindowState::new(openharmony_app, 0, true));
-
-        shared.frame.sync_delivery(openharmony_app, 0);
+        shared.frame.flush(openharmony_app, Instant::now());
         let main_wake = crate::frame::main_wake(openharmony_app);
         let timer_wake = main_wake.clone();
 
@@ -297,6 +298,7 @@ impl EventLoop {
             input: InputState::default(),
             input_states: HashMap::new(),
             wait_started: Instant::now(),
+            fallback_deadline: None,
         })
     }
 
@@ -1234,6 +1236,12 @@ impl EventLoop {
         let mut app = Some(app);
         openharmony_app.run_loop(move |event| {
             self.window_target.main_wake.begin_turn();
+            let _turn = crate::frame::enter_turn(match &event {
+                MainEvent::WindowRedraw(_) | MainEvent::SubWindowRedraw { .. } => {
+                    crate::frame::Turn::Frame
+                }
+                _ => crate::frame::Turn::Event,
+            });
             let destroyed = matches!(event, MainEvent::Destroy);
             if let Some(app) = app.as_mut() {
                 self.single_iteration(event, app);
@@ -1283,11 +1291,48 @@ impl EventLoop {
         self.window_target.create_proxy()
     }
 
-    fn sync_frame_delivery(&self) {
-        for (id, shared) in self.registered_windows() {
-            shared
-                .frame
-                .sync_delivery(&self.openharmony_app, id.into_raw() as i64);
+    /// Applies delivery changes outside frame callbacks and returns the earliest
+    /// fallback draw for windows whose callback registration failed.
+    fn sync_frame_delivery(&self, flush: bool, now: Instant) -> Option<Instant> {
+        let windows = self.window_target.windows.lock().unwrap();
+        let mut deadline: Option<Instant> = None;
+        for shared in windows.values() {
+            if flush {
+                shared.frame.flush(&self.openharmony_app, now);
+            }
+            if let Some(fallback) = shared.frame.fallback_deadline() {
+                deadline = Some(deadline.map_or(fallback, |deadline| deadline.min(fallback)));
+            }
+        }
+        deadline
+    }
+
+    fn dispatch_redraw<A: ApplicationHandler>(
+        &self,
+        id: WindowId,
+        shared: &SharedWindowState,
+        tick: bool,
+        app: &mut A,
+    ) {
+        let redraw = {
+            let mut state = shared.lock();
+            let WindowState {
+                lifecycle,
+                visible,
+                minimized,
+                redraw_pending,
+                ..
+            } = &mut *state;
+            lifecycle.take_redraw(tick, *visible, *minimized, redraw_pending)
+        };
+        if !redraw {
+            return;
+        }
+        app.window_event(&self.window_target, id, event::WindowEvent::RedrawRequested);
+        let mut state = shared.lock();
+        if state.presentable() && state.resize_settle.active(Instant::now()) {
+            state.redraw_pending = true;
+            shared.frame.request();
         }
     }
 
@@ -1358,7 +1403,26 @@ impl EventLoop {
             _ => 0,
         };
         let id = WindowId::from_raw(id as usize);
+        let frame_window = match &event {
+            MainEvent::WindowRedraw(_) | MainEvent::SubWindowRedraw { .. } => Some(id),
+            _ => None,
+        };
         let shared = self.window_target.windows.lock().unwrap().get(&id).cloned();
+        if frame_window.is_some() {
+            let Some(shared) = &shared else {
+                return;
+            };
+            shared.frame.on_callback();
+            let due = {
+                let state = shared.lock();
+                state.redraw_pending && state.presentable()
+            };
+            // Idle callbacks only count toward unregistration; they must not run a
+            // full application iteration on every vsync.
+            if !due && !matches!(self.window_target.control_flow(), ControlFlow::Poll) {
+                return;
+            }
+        }
         if let Some(shared) = shared {
             if self.current_window != id {
                 let old_input = std::mem::take(&mut self.input);
@@ -1378,10 +1442,6 @@ impl EventLoop {
         }
 
         let user_turn = matches!(&event, MainEvent::UserEvent);
-        let fallback_tick = match &event {
-            MainEvent::WindowRedraw(_) | MainEvent::SubWindowRedraw { .. } => Some(id),
-            _ => None,
-        };
         let cause = if self.loop_running {
             start_cause(self.window_target.control_flow(), self.wait_started)
         } else {
@@ -1468,35 +1528,25 @@ impl EventLoop {
             self.request_window_redraw(GLOBAL_WINDOW);
         }
         if !self.window_target.exiting() {
-            for (id, shared) in self.registered_windows() {
-                let tick = if user_turn {
-                    shared
-                        .frame
-                        .sync_delivery(&self.openharmony_app, id.into_raw() as i64);
-                    shared.frame.take_pending()
-                } else {
-                    fallback_tick == Some(id) && !shared.frame.healthy()
-                };
-                let redraw = {
-                    let mut state = shared.lock();
-                    let WindowState {
-                        lifecycle,
-                        visible,
-                        minimized,
-                        redraw_pending,
-                        ..
-                    } = &mut *state;
-                    lifecycle.take_redraw(tick, *visible, *minimized, redraw_pending)
-                };
-                if redraw {
-                    app.window_event(&self.window_target, id, event::WindowEvent::RedrawRequested);
-                    let mut state = shared.lock();
-                    if state.presentable() && state.resize_settle.active(Instant::now()) {
-                        state.redraw_pending = true;
-                        if shared.frame.healthy() {
-                            shared.frame.request_frame();
-                        }
-                    }
+            let now = Instant::now();
+            if let Some(frame_window) = frame_window {
+                let shared = self
+                    .window_target
+                    .windows
+                    .lock()
+                    .unwrap()
+                    .get(&frame_window)
+                    .cloned();
+                if let Some(shared) = shared {
+                    self.dispatch_redraw(frame_window, &shared, true, app);
+                }
+            } else if self
+                .fallback_deadline
+                .is_some_and(|deadline| deadline <= now)
+            {
+                for (id, shared) in self.registered_windows() {
+                    let tick = shared.frame.begin_fallback(now);
+                    self.dispatch_redraw(id, &shared, tick, app);
                 }
             }
         }
@@ -1507,33 +1557,43 @@ impl EventLoop {
             return;
         }
         self.wait_started = Instant::now();
-        let presentable = self
-            .registered_windows()
-            .into_iter()
-            .find(|(_, shared)| shared.lock().presentable());
         use crate::control_flow::{Action, ControlFlow as Policy, control_flow_action};
         let flow = match self.window_target.control_flow() {
             ControlFlow::Wait => Policy::Wait,
             ControlFlow::WaitUntil(deadline) => Policy::WaitUntil(deadline),
             ControlFlow::Poll => Policy::Poll,
         };
-        match control_flow_action(flow, self.wait_started, presentable.is_some()) {
-            Action::Wait => self.timer.set_deadline(None),
-            Action::Deadline(deadline) => self.timer.set_deadline(Some(deadline)),
+        let presentable = matches!(flow, Policy::Poll)
+            .then(|| {
+                self.registered_windows()
+                    .into_iter()
+                    .find(|(_, shared)| shared.lock().presentable())
+            })
+            .flatten();
+        let deadline = match control_flow_action(flow, self.wait_started, presentable.is_some()) {
+            Action::Wait => None,
+            Action::Deadline(deadline) => Some(deadline),
             Action::Wake => {
-                self.timer.set_deadline(None);
                 self.window_target.main_wake.notify();
+                None
             }
             Action::Frame => {
-                self.timer.set_deadline(None);
                 if let Some((_, shared)) = presentable {
                     let state = shared.lock();
                     if state.presentable() {
-                        shared.frame.request_frame();
+                        shared.frame.request();
                     }
                 }
+                None
             }
-        }
+        };
+        self.fallback_deadline =
+            self.sync_frame_delivery(frame_window.is_none(), self.wait_started);
+        let deadline = match (deadline, self.fallback_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.timer.set_deadline(deadline);
     }
 
     fn handle_main_event<A: ApplicationHandler>(&mut self, event: MainEvent<'_>, app: &mut A) {
@@ -1616,7 +1676,6 @@ impl EventLoop {
                     state.invalidate_cursor();
                     self.window_target.shared.sync_active(&state);
                 }
-                self.sync_frame_delivery();
                 self.synchronize_window_state();
                 if let Some(ready) = self.window_target.shared.ready.lock().unwrap().take() {
                     let _ = ready.send(());
@@ -1682,7 +1741,6 @@ impl EventLoop {
             state.invalidate_cursor();
             self.window_target.shared.sync_active(&state);
         }
-        self.sync_frame_delivery();
         self.synchronize_window_state();
         self.ensure_resumed(app);
         if !self.surface_available {
@@ -1834,7 +1892,9 @@ impl EventLoop {
             let changed = state.surface_size != size;
             state.surface_size = size;
             state.surface_position = PhysicalPosition::new(content_rect.left, content_rect.top);
-            state.resize_settle.extend(Instant::now());
+            if changed {
+                state.resize_settle.extend(Instant::now());
+            }
             if state.outer_size == PhysicalSize::new(0, 0) {
                 state.outer_size = size;
             }
@@ -1847,6 +1907,7 @@ impl EventLoop {
                 event::WindowEvent::SurfaceResized(size),
             );
         }
+        // Repeated notifications cost one frame, not another settle window.
         self.window_target.shared.request_redraw();
     }
 
@@ -2204,7 +2265,6 @@ impl Window {
                 id.into_raw() as i64,
                 el.visible.get(),
             ));
-            shared.frame.sync_delivery(&el.app, id.into_raw() as i64);
             shared.lock().scale_factor = scale_factor(&el.app);
             el.windows.lock().unwrap().insert(id, shared.clone());
             shared

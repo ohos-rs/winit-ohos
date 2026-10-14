@@ -18,7 +18,7 @@ mod event_loop;
 pub mod events;
 pub mod file_access;
 mod frame;
-mod frame_request;
+mod frame_demand;
 mod geometry;
 mod keycodes;
 mod main_wake;
