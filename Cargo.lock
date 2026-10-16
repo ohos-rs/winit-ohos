@@ -733,8 +733,9 @@ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
 name = "openharmony-ability"
-version = "1.0.0-beta.2"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0c87a7bc4c23b9e845cf7338ba472a49c59c91ceb5570ccae1d9c3714f6802d"
 dependencies = [
  "futures-channel",
  "log",
@@ -756,8 +757,9 @@ dependencies = [
 
 [[package]]
 name = "openharmony-ability-derive"
-version = "1.0.0-beta.1"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb2362c23c153042b1398fc9f87592dec24ca1b10aa06c08c45474dc2e366c85"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -766,8 +768,9 @@ dependencies = [
 
 [[package]]
 name = "openharmony-ability-plugin-accessibility"
-version = "1.0.0-beta.0"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd22f2d0e94964e1b6c20db5976bdfd4ca6d44fdf0a6b096b857d5d55b850e08"
 dependencies = [
  "futures-executor",
  "log",
@@ -778,8 +781,9 @@ dependencies = [
 
 [[package]]
 name = "openharmony-ability-plugin-app-control"
-version = "1.0.0-beta.1"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "880914d99511e7da8c194c475e41713f402dec64c8d9a0ff358d9a353c05b5b2"
 dependencies = [
  "napi-derive-ohos",
  "napi-ohos",
@@ -788,8 +792,9 @@ dependencies = [
 
 [[package]]
 name = "openharmony-ability-plugin-clipboard"
-version = "1.0.0-beta.0"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69f95a545783e5f024022125227d1d471f110eb6b36b50bbd3e70a4db041c856"
 dependencies = [
  "napi-derive-ohos",
  "napi-ohos",
@@ -798,8 +803,9 @@ dependencies = [
 
 [[package]]
 name = "openharmony-ability-plugin-files"
-version = "1.0.0-beta.1"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7bad0340e22cc4f24396294d1cec90db7f7fd42d5907ad7d13e15d1aa3d44008"
 dependencies = [
  "napi-derive-ohos",
  "napi-ohos",
@@ -808,8 +814,9 @@ dependencies = [
 
 [[package]]
 name = "openharmony-ability-plugin-menu"
-version = "1.0.0-beta.0"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52690f37cf03ffc7ecfb906427117281181e5214d02d737ba648b1de427fdbb5"
 dependencies = [
  "crossbeam-channel",
  "napi-derive-ohos",
@@ -821,8 +828,9 @@ dependencies = [
 
 [[package]]
 name = "openharmony-ability-plugin-notification"
-version = "1.0.0-beta.0"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74ed67f85ddc2fdd5597bad77cf7965ba9de02271fceb8cbc6741489c006b698"
 dependencies = [
  "napi-derive-ohos",
  "napi-ohos",
@@ -831,8 +839,9 @@ dependencies = [
 
 [[package]]
 name = "openharmony-ability-plugin-permission"
-version = "1.0.0-beta.1"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b0ba789080d425ca4a1a8dbf712c61a27e99d0ea681bbef901fc7379e0953f6"
 dependencies = [
  "napi-derive-ohos",
  "napi-ohos",
@@ -841,8 +850,9 @@ dependencies = [
 
 [[package]]
 name = "openharmony-ability-plugin-process"
-version = "1.0.0-beta.0"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f4f76ea2f85b8a231c1e5398d6347206d04adbffce9da5db4a0c3d07710ea6a"
 dependencies = [
  "napi-derive-ohos",
  "napi-ohos",
@@ -851,8 +861,9 @@ dependencies = [
 
 [[package]]
 name = "openharmony-ability-plugin-system-state"
-version = "1.0.0-beta.0"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "549c94a63135e74d7602bb150754bbe83547fe4d7a1ba3c4560f04f8e5231112"
 dependencies = [
  "crossbeam-channel",
  "napi-derive-ohos",
@@ -862,8 +873,9 @@ dependencies = [
 
 [[package]]
 name = "openharmony-ability-plugin-url"
-version = "1.0.0-beta.1"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "124336a1a3436a884e53b4c500acb26ac102f082fa37cc4c1f62419f83e9b3f1"
 dependencies = [
  "napi-derive-ohos",
  "napi-ohos",
@@ -872,8 +884,9 @@ dependencies = [
 
 [[package]]
 name = "openharmony-ability-plugin-window"
-version = "1.0.0-beta.1"
-source = "git+https://github.com/richerfu/openharmony-ability.git?rev=eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb#eab9d11ad00ab8ab85aff5e5c3cfa86cdd6fb5bb"
+version = "1.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c139a001315611810d4b421c4b50f910759b42f162300d98a1b282cf6a6dea74"
 dependencies = [
  "napi-derive-ohos",
  "napi-ohos",

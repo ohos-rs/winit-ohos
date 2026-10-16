@@ -5,10 +5,10 @@ Winit's OpenHarmony backend, driven by `openharmony-ability` lifecycle callbacks
 ## Dependency policy
 
 This branch pins `winit-core` and `dpi` to the same richerfu/winit 0.31 beta revision.
-Ability and all plugin crates use one matching richerfu/openharmony-ability revision,
-which in turn pins the native bindings containing the drag-result and pen-tilt APIs.
-The current Ability/N-API toolchain requires Rust 1.88. Keep these revisions aligned
-when updating the dependency graph; `Cargo.lock` records the tested resolution.
+Ability, its derive crate and all Ability plugins use the exact crates.io release
+`=1.0.0-beta.3`, with published native bindings containing the drag-result and pen-tilt APIs.
+The current Ability/N-API toolchain requires Rust 1.88. Keep the Ability family on one
+release when updating the dependency graph; `Cargo.lock` records the tested resolution.
 
 `openharmony-ability` and its derive crate are regular dependencies because this repository is an
 OHOS-only backend; they are not hidden behind a `target_env = "ohos"` dependency table.
@@ -23,7 +23,7 @@ the `#[ability]` macro expansion:
 [dependencies]
 napi-ohos = "1.2"
 napi-derive-ohos = "1.2"
-openharmony-ability = { git = "https://github.com/richerfu/openharmony-ability.git", rev = "d8cf549505fca3ea39d4a56cb58334a85a6d1dc6" }
+openharmony-ability = "=1.0.0-beta.3"
 winit = { git = "https://github.com/richerfu/winit.git", rev = "c9ee2bff8a79aacb8068546e7150197693d35a5a" }
 
 [build-dependencies]
@@ -111,12 +111,12 @@ cannot resume if the system rebuilds the Ability in a cached process.
 
 ## Platform capabilities
 
-Use the pinned Ability and winit revisions together with the matching ArkTS HARs.
+Use Ability `1.0.0-beta.3` and the pinned winit revision together with the matching ArkTS HARs.
 `EventLoop` idempotently registers the window, clipboard, URL, files, app-control
 and permission facades. `extended-plugins` also registers menus, notifications,
 process control, system state and accessibility state. The matching ArkTS factories
 must be installed in `NativeAbility.bridgePlugins`. Build those HARs from the same
-Ability commit as the Rust dependencies.
+Ability release source as the Rust dependencies.
 
 Window mutations run asynchronously in per-window order. Native children wait for
 surface readiness before their queued configuration runs. Clipboard reads and file
