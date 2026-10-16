@@ -1,13 +1,8 @@
-//! # OpenHarmony
+//! Winit's OpenHarmony backend, driven by
+//! [`openharmony-ability`](https://docs.rs/openharmony-ability/).
 //!
-//! The OpenHarmony backend builds on (and exposes types from) the [`ohos-rs`](https://docs.rs/ohos-rs/) crate.
-//!
-//! Native OpenHarmony applications need some form of "glue" crate that is responsible
-//! for defining the main entry point for your Rust application as well as tracking
-//! various life-cycle events and synchronizing with the main thread.
-//!
-//! Winit uses the [openharmony-ability](https://docs.rs/openharmony-ability/) as a
-//! glue crate.
+//! Create the event loop from the Ability initializer and supply its
+//! [`OpenHarmonyApp`].
 //!
 #![cfg(target_env = "ohos")]
 
@@ -68,7 +63,7 @@ impl ActiveEventLoopExtOpenHarmony for dyn CoreActiveEventLoop + '_ {
 pub trait WindowExtOpenHarmony {
     /// Get the Ability handle that owns this window.
     ///
-    /// This can be used with the optional `plugins::window` facade or plugins owned by the app.
+    /// This can be used with the `plugins::window` facade or plugins owned by the app.
     fn openharmony_app(&self) -> &OpenHarmonyApp;
 
     /// Consume native IME edits announced by a `WindowEvent::Ime` notification.
