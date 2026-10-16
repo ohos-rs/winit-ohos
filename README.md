@@ -107,7 +107,7 @@ cargo fmt --check
 Run frame scheduler tests on the host without OHOS libraries:
 
 ```sh
-rustc --edition=2024 --test --cfg 'feature="native-vsync"' tests/frame_scheduler.rs -o /tmp/winit-ohos-frames
+rustc --edition=2021 --test --cfg 'feature="native-vsync"' tests/frame_scheduler.rs -o /tmp/winit-ohos-frames
 /tmp/winit-ohos-frames
 ```
 

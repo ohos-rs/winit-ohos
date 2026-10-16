@@ -10,8 +10,8 @@ use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     sync::{
-        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };

@@ -1,6 +1,6 @@
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicU8, Ordering},
+    Arc, Mutex,
 };
 
 const EVENT: u8 = 1;

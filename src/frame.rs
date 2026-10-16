@@ -4,8 +4,8 @@
 use std::{
     cell::Cell,
     sync::{
-        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };

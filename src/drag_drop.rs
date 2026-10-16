@@ -4,8 +4,8 @@ use std::{
     collections::HashMap,
     ops::ControlFlow,
     sync::{
-        Arc,
         atomic::{AtomicI64, Ordering},
+        Arc,
     },
 };
 use winit_core::{

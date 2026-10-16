@@ -13,11 +13,11 @@ use openharmony_ability::xcomponent::{
 use tracing::{trace, warn};
 
 use openharmony_ability::{
+    arkui::arkui_input_binding::{UIInputAction, UIInputEvent, UIInputSourceType, UIInputToolType},
+    ime::KeyboardStatus,
     ArkUiInputEvent, AvoidAreaType, ColorMode, Configuration, Event as MainEvent, GestureEvent,
     GesturePhase as OhosGesturePhase, ImeEvent, InputEvent, KeyboardEventData,
     KeyboardInputDelivery, OpenHarmonyApp, Rect, XComponentInputEvent,
-    arkui::arkui_input_binding::{UIInputAction, UIInputEvent, UIInputSourceType, UIInputToolType},
-    ime::KeyboardStatus,
 };
 
 use dpi::{PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
@@ -1597,10 +1597,10 @@ impl EventLoop {
             &event,
             Some(MainEvent::Input(_) | MainEvent::SubWindowInput { .. })
         );
-        if !(input_turn && id == self.current_window)
-            && let Some(touch) = self.input.pending_touch.take()
-        {
-            self.handle_touch_event(&touch, app);
+        if !(input_turn && id == self.current_window) {
+            if let Some(touch) = self.input.pending_touch.take() {
+                self.handle_touch_event(&touch, app);
+            }
         }
         if let Some(shared) = shared {
             if self.current_window != id {
@@ -1661,8 +1661,8 @@ impl EventLoop {
             }
         }
         let registered = self.window_target.windows.lock().unwrap().contains_key(&id);
-        if let Some(event) = event
-            && (registered
+        if let Some(event) = event {
+            if registered
                 || matches!(
                     &event,
                     MainEvent::ConfigChanged(_)
@@ -1677,9 +1677,10 @@ impl EventLoop {
                         | MainEvent::Create
                         | MainEvent::WindowCreate
                         | MainEvent::SaveState(_)
-                ))
-        {
-            self.handle_main_event(event, app);
+                )
+            {
+                self.handle_main_event(event, app);
+            }
         }
         if proxy_wake_up {
             app.proxy_wake_up(&self.window_target);
@@ -1690,10 +1691,10 @@ impl EventLoop {
                 app.window_event(&self.window_target, id, event);
             }
         }
-        if let Some((id, event)) = crate::drag_drop::drain_outgoing()
-            && self.window_target.windows.lock().unwrap().contains_key(&id)
-        {
-            app.window_event(&self.window_target, id, event);
+        if let Some((id, event)) = crate::drag_drop::drain_outgoing() {
+            if self.window_target.windows.lock().unwrap().contains_key(&id) {
+                app.window_event(&self.window_target, id, event);
+            }
         }
         if crate::events::take_pending() {
             self.request_window_redraw(GLOBAL_WINDOW);
@@ -1728,7 +1729,7 @@ impl EventLoop {
             return;
         }
         self.wait_started = Instant::now();
-        use crate::control_flow::{Action, ControlFlow as Policy, control_flow_action};
+        use crate::control_flow::{control_flow_action, Action, ControlFlow as Policy};
         let flow = match self.window_target.control_flow() {
             ControlFlow::Wait => Policy::Wait,
             ControlFlow::WaitUntil(deadline) => Policy::WaitUntil(deadline),
@@ -2013,17 +2014,16 @@ impl EventLoop {
             } else {
                 self.input_states.get_mut(&id)
             };
-            if !focused
-                && let Some(input) = input
-                && (!input.modifiers.is_empty() || !input.modifier_keys.is_empty())
-            {
-                input.modifiers = ModifiersState::empty();
-                input.modifier_keys = ModifiersKeys::empty();
-                app.window_event(
-                    &self.window_target,
-                    id,
-                    event::WindowEvent::ModifiersChanged(Modifiers::default()),
-                );
+            if let Some(input) = input {
+                if !focused && (!input.modifiers.is_empty() || !input.modifier_keys.is_empty()) {
+                    input.modifiers = ModifiersState::empty();
+                    input.modifier_keys = ModifiersKeys::empty();
+                    app.window_event(
+                        &self.window_target,
+                        id,
+                        event::WindowEvent::ModifiersChanged(Modifiers::default()),
+                    );
+                }
             }
         }
     }
@@ -2113,14 +2113,14 @@ impl EventLoop {
                     trace!("ignoring a surface-size request during an OHOS scale-factor change");
                 }
             }
-            if theme != old_theme
-                && let Some(theme) = theme
-            {
-                app.window_event(
-                    &self.window_target,
-                    id,
-                    event::WindowEvent::ThemeChanged(theme),
-                );
+            if theme != old_theme {
+                if let Some(theme) = theme {
+                    app.window_event(
+                        &self.window_target,
+                        id,
+                        event::WindowEvent::ThemeChanged(theme),
+                    );
+                }
             }
             shared.request_redraw();
         }

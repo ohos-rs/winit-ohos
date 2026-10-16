@@ -42,10 +42,10 @@ pub(crate) fn all() -> Vec<MonitorHandle> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<CachedMonitors>> =
         std::sync::OnceLock::new();
     let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
-    if let Some((time, monitors)) = &*cache
-        && time.elapsed().as_millis() < 500
-    {
-        return monitors.clone();
+    if let Some((time, monitors)) = &*cache {
+        if time.elapsed().as_millis() < 500 {
+            return monitors.clone();
+        }
     }
     let monitors = query();
     *cache = Some((std::time::Instant::now(), monitors.clone()));

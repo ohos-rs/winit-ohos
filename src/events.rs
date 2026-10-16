@@ -1,6 +1,6 @@
 //! Platform events without a cross-platform winit equivalent.
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock, mpsc};
+use std::sync::{mpsc, Mutex, OnceLock};
 
 static PENDING: AtomicBool = AtomicBool::new(false);
 

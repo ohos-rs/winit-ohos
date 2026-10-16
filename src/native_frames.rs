@@ -1,8 +1,8 @@
 //! NativeVSync callbacks only signal the Ability loop; application code and
 //! receiver management run on the UI thread.
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
 use ohos_vsync_binding::{OH_NativeVSync_ExpectedRateRange as ExpectedRateRange, Vsync};
