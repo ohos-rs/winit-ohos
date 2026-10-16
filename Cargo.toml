@@ -1,7 +1,7 @@
 [package]
 name = "winit-ohos"
 version = "0.31.0-beta.3"
-edition = "2024"
+edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ohos-rs/winit-ohos.git"
@@ -9,14 +9,52 @@ description = "Winit's OpenHarmony backend"
 
 [features]
 default = []
-plugin-window = ["dep:openharmony-ability-plugin-window"]
+native-vsync = ["dep:ohos-vsync-binding"]
+plugin-window = []
+extended-plugins = [
+  "dep:openharmony-ability-plugin-menu",
+  "dep:openharmony-ability-plugin-notification",
+  "dep:openharmony-ability-plugin-process",
+  "dep:openharmony-ability-plugin-system-state",
+  "dep:openharmony-ability-plugin-accessibility",
+  "dep:crossbeam-channel",
+]
 
 [dependencies]
-winit-core = "=0.31.0-beta.3"
-tracing = { version = "0.1.40", default-features = false }
-dpi = "=0.1.2"
+winit-core = { version = "=0.31.0-beta.3", git = "https://github.com/richerfu/winit.git", rev = "c9ee2bff8a79aacb8068546e7150197693d35a5a" }
+tracing = { version = "0.1.40", default-features = false, features = ["log"] }
+dpi = { version = "=0.1.2", git = "https://github.com/richerfu/winit.git", rev = "c9ee2bff8a79aacb8068546e7150197693d35a5a" }
 rwh_06 = { package = "raw-window-handle", version = "0.6", features = ["std"] }
 
-openharmony-ability = { version = "1.0.0-beta.2" }
-openharmony-ability-derive = { version = "1.0.0-beta.1" }
-openharmony-ability-plugin-window = { version = "1.0.0-beta.1", optional = true }
+openharmony-ability = { version = "=1.0.0-beta.3", features = [
+  "keyboard",
+  "mouse",
+  "drag",
+  "stylus",
+] }
+openharmony-ability-derive = "=1.0.0-beta.3"
+openharmony-ability-plugin-window = "=1.0.0-beta.3"
+
+futures-executor = { version = "0.3", features = ["thread-pool"] }
+futures-channel = "0.3"
+ohos-fileuri-binding = "0.1"
+ohos-fileshare-binding = "0.2.4"
+openharmony-ability-plugin-clipboard = "=1.0.0-beta.3"
+openharmony-ability-plugin-url = "=1.0.0-beta.3"
+openharmony-ability-plugin-files = "=1.0.0-beta.3"
+openharmony-ability-plugin-app-control = "=1.0.0-beta.3"
+ohos-window-manager-binding = { version = "0.1.1", features = ["api-22"] }
+
+ohos-display-sys = { version = "0.1.4", features = ["api-14"] }
+ohos-vsync-binding = { version = "0.3.1", optional = true, default-features = false, features = [
+  "api-20",
+] }
+
+openharmony-ability-plugin-permission = "=1.0.0-beta.3"
+
+crossbeam-channel = { version = "0.5", optional = true }
+openharmony-ability-plugin-menu = { version = "=1.0.0-beta.3", optional = true }
+openharmony-ability-plugin-notification = { version = "=1.0.0-beta.3", optional = true }
+openharmony-ability-plugin-process = { version = "=1.0.0-beta.3", optional = true }
+openharmony-ability-plugin-system-state = { version = "=1.0.0-beta.3", optional = true }
+openharmony-ability-plugin-accessibility = { version = "=1.0.0-beta.3", optional = true }
