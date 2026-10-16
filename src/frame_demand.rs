@@ -32,6 +32,11 @@ impl Default for FrameDemand {
 }
 
 impl FrameDemand {
+    #[cfg(feature = "native-vsync")]
+    pub(crate) fn is_active(&self) -> bool {
+        self.active
+    }
+
     pub(crate) fn set_active(&mut self, active: bool) {
         if self.active == active {
             return;

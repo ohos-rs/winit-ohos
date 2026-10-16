@@ -13,8 +13,9 @@ when updating the dependency graph; `Cargo.lock` records the tested resolution.
 `openharmony-ability` and its derive crate are regular dependencies because this repository is an
 OHOS-only backend; they are not hidden behind a `target_env = "ohos"` dependency table.
 
-Applications should depend on the Winit facade only. Its OHOS target dependency selects
-`winit-ohos`, so adding this backend a second time would create conflicting Winit core types. An
+Applications use the Winit facade. Its OHOS target dependency selects `winit-ohos`;
+any direct backend dependency used to enable features must resolve to that same package
+and source, keeping Winit core types aligned. An
 Ability native-module crate still needs the standard direct N-API/Ability dependencies required by
 the `#[ability]` macro expansion:
 
@@ -75,9 +76,15 @@ fn openharmony_app(app: OpenHarmonyApp) {
 The backend translates Ability lifecycle, surface geometry, safe areas, configuration,
 XComponent touch/mouse/key input, ArkUI axis/gesture input and IME callbacks into
 winit events. `run_app` registers callbacks and returns to the Ability main loop.
-`request_redraw` schedules an on-demand NativeVSync tick for each presentable window;
-Ability uses `FrameInputDelivery::OnDemand` while NativeVSync is healthy. Creation or
-request failure falls back to `Continuous`, which redraws only when requested.
+`request_redraw` enables frame callbacks for each presentable window. By default these
+come from XComponent. The optional `native-vsync` feature uses independent NativeVSync
+receivers, votes for the display refresh rate (API 20+), and keeps Ability in
+`FrameInputDelivery::OnDemand`. Callbacks wake the Ability UI thread; application code
+runs there. Both sources stop after 12 idle callbacks and restart on new demand.
+NativeVSync creation, refresh-rate voting or frame-request failure selects XComponent
+until the surface is recreated. If XComponent registration also fails, a 16 ms timer
+delivers one fallback draw per new demand. Hiding or destroying a surface stops its
+receiver; callbacks from an old receiver cannot redraw a replacement surface.
 Main-thread wakes are coalesced. Lifecycle and input callbacks request a future frame;
 presentation happens after event and data-transfer delivery in a frame iteration.
 Background and minimized windows retain redraw demand until they become presentable.
@@ -132,10 +139,27 @@ are unpublished:
 winit-ohos = { path = "/path/to/winit-ohos" }
 ```
 
+To enable NativeVSync through Cargo feature unification, add the following alongside
+that patch in the application manifest. Keep the backend version aligned with the
+Winit facade's dependency:
+
+```toml
+[target.'cfg(target_env = "ohos")'.dependencies]
+winit-ohos = { version = "=0.31.0-beta.3", features = ["native-vsync"] }
+```
+
 Run `cargo check --all-targets --all-features --target aarch64-unknown-linux-ohos`
 and the matching Clippy command with `OHOS_NDK_HOME` pointing to the OpenHarmony SDK.
 Cross-compilation checks do not replace device tests for pen metadata, drag completion
-and accessibility services.
+and accessibility services, or NativeVSync cadence and refresh-rate voting.
+
+The frame scheduler tests replace the NDK/Ability boundary and run on the host without
+OHOS libraries:
+
+```sh
+rustc --edition=2024 --test --cfg 'feature="native-vsync"' tests/frame_scheduler.rs -o /tmp/winit-ohos-frames
+/tmp/winit-ohos-frames
+```
 
 ## License
 

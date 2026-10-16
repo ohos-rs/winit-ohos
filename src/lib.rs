@@ -24,6 +24,8 @@ mod ime_text;
 mod keycodes;
 mod main_wake;
 mod monitor;
+#[cfg(feature = "native-vsync")]
+mod native_frames;
 pub mod plugins;
 mod resize_settle;
 mod safe_area;

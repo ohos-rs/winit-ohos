@@ -50,6 +50,12 @@ use crate::keycodes;
 const GLOBAL_WINDOW: WindowId = WindowId::from_raw(0);
 static EVENT_LOOP_CREATED: AtomicBool = AtomicBool::new(false);
 
+enum LoopEvent<'a> {
+    Ability(MainEvent<'a>),
+    #[cfg(feature = "native-vsync")]
+    NativeFrame(WindowId),
+}
+
 #[derive(Debug)]
 pub struct EventLoop {
     pub openharmony_app: OpenHarmonyApp,
@@ -1347,7 +1353,7 @@ impl EventLoop {
         let openharmony_app = self.openharmony_app.clone();
         let mut app = Some(app);
         openharmony_app.run_loop(move |event| {
-            self.window_target.main_wake.begin_turn();
+            let frame_only = self.window_target.main_wake.begin_turn();
             let _turn = crate::frame::enter_turn(match &event {
                 MainEvent::WindowRedraw(_) | MainEvent::SubWindowRedraw { .. } => {
                     crate::frame::Turn::Frame
@@ -1356,7 +1362,28 @@ impl EventLoop {
             });
             let destroyed = matches!(event, MainEvent::Destroy);
             if let Some(app) = app.as_mut() {
-                self.single_iteration(event, app);
+                #[cfg(feature = "native-vsync")]
+                let frames: Vec<_> = if matches!(event, MainEvent::UserEvent) {
+                    self.registered_windows()
+                        .into_iter()
+                        .filter(|(_, shared)| shared.frame.native_callback_pending())
+                        .map(|(id, _)| id)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                #[cfg(feature = "native-vsync")]
+                let frame_only = frame_only && !frames.is_empty();
+                // A pure NativeVSync wake becomes per-window frame iterations,
+                // including the idle fast path. Coalesced event work runs first.
+                if !frame_only || !matches!(event, MainEvent::UserEvent) {
+                    self.single_iteration(LoopEvent::Ability(event), app);
+                }
+                #[cfg(feature = "native-vsync")]
+                for id in frames {
+                    let _turn = crate::frame::enter_turn(crate::frame::Turn::Frame);
+                    self.single_iteration(LoopEvent::NativeFrame(id), app);
+                }
             }
             // Ability retains this callback. Release application and GPU resources at
             // shutdown instead of keeping them alive in the callback forever.
@@ -1497,34 +1524,52 @@ impl EventLoop {
         self.window_target.windows.lock().unwrap().remove(&id);
     }
 
-    fn single_iteration<A: ApplicationHandler>(&mut self, event: MainEvent<'_>, app: &mut A) {
+    fn single_iteration<A: ApplicationHandler>(&mut self, event: LoopEvent<'_>, app: &mut A) {
         if self.window_target.exiting() {
             self.timer.set_deadline(None);
             return;
         }
-        let id = match &event {
-            MainEvent::WindowResize { window_id, .. }
-            | MainEvent::WindowFocusChanged { window_id, .. }
-            | MainEvent::SubWindowInput { window_id, .. }
-            | MainEvent::SubWindowRedraw { window_id, .. } => *window_id,
-            MainEvent::SubWindowSurfaceCreate(id)
-            | MainEvent::SubWindowSurfaceDestroy(id)
-            | MainEvent::SubWindowClosed(id) => *id,
-            MainEvent::ContentRectChange(content) => content.window_id,
-            MainEvent::AvoidAreaChange(info) => info.window_id,
-            _ => 0,
+        let (event, native_frame): (Option<_>, Option<WindowId>) = match event {
+            LoopEvent::Ability(event) => (Some(event), None),
+            #[cfg(feature = "native-vsync")]
+            LoopEvent::NativeFrame(id) => (None, Some(id)),
         };
-        let id = WindowId::from_raw(id as usize);
-        let frame_window = match &event {
-            MainEvent::WindowRedraw(_) | MainEvent::SubWindowRedraw { .. } => Some(id),
+        let id = native_frame.unwrap_or_else(|| {
+            let id = match &event {
+                Some(
+                    MainEvent::WindowResize { window_id, .. }
+                    | MainEvent::WindowFocusChanged { window_id, .. }
+                    | MainEvent::SubWindowInput { window_id, .. }
+                    | MainEvent::SubWindowRedraw { window_id, .. },
+                ) => *window_id,
+                Some(
+                    MainEvent::SubWindowSurfaceCreate(id)
+                    | MainEvent::SubWindowSurfaceDestroy(id)
+                    | MainEvent::SubWindowClosed(id),
+                ) => *id,
+                Some(MainEvent::ContentRectChange(content)) => content.window_id,
+                Some(MainEvent::AvoidAreaChange(info)) => info.window_id,
+                _ => 0,
+            };
+            WindowId::from_raw(id as usize)
+        });
+        let frame_window = native_frame.or(match &event {
+            Some(MainEvent::WindowRedraw(_) | MainEvent::SubWindowRedraw { .. }) => Some(id),
             _ => None,
-        };
+        });
         let shared = self.window_target.windows.lock().unwrap().get(&id).cloned();
         if frame_window.is_some() {
             let Some(shared) = &shared else {
                 return;
             };
-            shared.frame.on_callback();
+            let delivered = match native_frame {
+                #[cfg(feature = "native-vsync")]
+                Some(_) => shared.frame.take_native_callback(),
+                _ => shared.frame.on_callback(),
+            };
+            if !delivered {
+                return;
+            }
             let due = {
                 let state = shared.lock();
                 state.redraw_pending && state.presentable()
@@ -1536,7 +1581,7 @@ impl EventLoop {
             }
         }
 
-        let user_turn = matches!(&event, MainEvent::UserEvent);
+        let user_turn = matches!(&event, Some(MainEvent::UserEvent));
         let cause = if self.loop_running {
             start_cause(self.window_target.control_flow(), self.wait_started)
         } else {
@@ -1550,7 +1595,7 @@ impl EventLoop {
         // input dispatch. Any other turn means that metadata is not coming.
         let input_turn = matches!(
             &event,
-            MainEvent::Input(_) | MainEvent::SubWindowInput { .. }
+            Some(MainEvent::Input(_) | MainEvent::SubWindowInput { .. })
         );
         if !(input_turn && id == self.current_window)
             && let Some(touch) = self.input.pending_touch.take()
@@ -1616,22 +1661,23 @@ impl EventLoop {
             }
         }
         let registered = self.window_target.windows.lock().unwrap().contains_key(&id);
-        if registered
-            || matches!(
-                &event,
-                MainEvent::ConfigChanged(_)
-                    | MainEvent::Start
-                    | MainEvent::Stop
-                    | MainEvent::Resume(_)
-                    | MainEvent::Destroy
-                    | MainEvent::LowMemory
-                    | MainEvent::UserEvent
-                    | MainEvent::NewWant { .. }
-                    | MainEvent::Pause
-                    | MainEvent::Create
-                    | MainEvent::WindowCreate
-                    | MainEvent::SaveState(_)
-            )
+        if let Some(event) = event
+            && (registered
+                || matches!(
+                    &event,
+                    MainEvent::ConfigChanged(_)
+                        | MainEvent::Start
+                        | MainEvent::Stop
+                        | MainEvent::Resume(_)
+                        | MainEvent::Destroy
+                        | MainEvent::LowMemory
+                        | MainEvent::UserEvent
+                        | MainEvent::NewWant { .. }
+                        | MainEvent::Pause
+                        | MainEvent::Create
+                        | MainEvent::WindowCreate
+                        | MainEvent::SaveState(_)
+                ))
         {
             self.handle_main_event(event, app);
         }

@@ -1,6 +1,6 @@
-//! XComponent frame callbacks drive redraws. Each window registers its native
-//! callback only while it has frame demand and unregisters after a short idle
-//! period, so an idle app receives no per-vsync wakeups.
+//! XComponent callbacks (or optional NativeVSync receivers) drive redraws. Each
+//! window enables delivery only while it has frame demand and stops after a
+//! short idle period, so an idle app receives no per-vsync wakeups.
 use std::{
     cell::Cell,
     sync::{
@@ -16,6 +16,9 @@ use crate::{
     frame_demand::{DeliveryChange, FrameDemand},
     main_wake::MainWake,
 };
+
+#[cfg(feature = "native-vsync")]
+use crate::native_frames::NativeFrames;
 
 /// One fallback draw is scheduled when callback registration fails.
 const FALLBACK_FRAME_DELAY: Duration = Duration::from_millis(16);
@@ -69,6 +72,10 @@ struct State {
     fallback_at: Option<Instant>,
     register_warned: bool,
     unregister_warned: bool,
+    #[cfg(feature = "native-vsync")]
+    native: Option<NativeFrames>,
+    #[cfg(feature = "native-vsync")]
+    native_failed: bool,
 }
 
 pub(crate) struct FrameScheduler {
@@ -120,6 +127,11 @@ impl FrameScheduler {
             if state.surface && !surface_available {
                 state.demand.surface_destroyed();
                 state.fallback_at = None;
+                #[cfg(feature = "native-vsync")]
+                {
+                    state.native.take();
+                    state.native_failed = false;
+                }
             }
             state.surface = surface_available;
             state.demand.set_active(presentable);
@@ -139,16 +151,60 @@ impl FrameScheduler {
         }
     }
 
-    /// Records a native frame callback for this window.
-    pub(crate) fn on_callback(&self) {
+    /// Records an XComponent callback, ignoring it while NativeVSync is selected.
+    pub(crate) fn on_callback(&self) -> bool {
         let pending = {
             let mut state = self.lock();
+            #[cfg(feature = "native-vsync")]
+            if !state.native_failed {
+                return false;
+            }
             state.fallback_at = None;
             state.demand.on_callback()
         };
         if pending.is_some() {
             self.mark_sync();
         }
+        true
+    }
+
+    /// Consumes a NativeVSync signal on the UI thread and arms the next tick
+    /// before drawing, so demand from the idle-threshold draw can keep it alive.
+    #[cfg(feature = "native-vsync")]
+    pub(crate) fn take_native_callback(&self) -> bool {
+        let mut state = self.lock();
+        if !state.demand.is_active()
+            || !state
+                .native
+                .as_ref()
+                .is_some_and(NativeFrames::take_callback)
+        {
+            return false;
+        }
+        state.fallback_at = None;
+        state.demand.on_callback();
+        if let Err(error) = state.native.as_ref().unwrap().request() {
+            tracing::warn!(
+                "NativeVSync stopped for window {}; falling back to XComponent callbacks: {error}",
+                self.id
+            );
+            state.native.take();
+            state.native_failed = true;
+            state.demand.complete(DeliveryChange::Register, false);
+            state.demand.request();
+        }
+        if state.demand.pending().is_some() {
+            self.mark_sync();
+        }
+        true
+    }
+
+    #[cfg(feature = "native-vsync")]
+    pub(crate) fn native_callback_pending(&self) -> bool {
+        self.lock()
+            .native
+            .as_ref()
+            .is_some_and(NativeFrames::callback_pending)
     }
 
     /// Applies a pending delivery change. Must not run inside a frame callback.
@@ -163,11 +219,55 @@ impl FrameScheduler {
         let Some(change) = state.demand.pending() else {
             return;
         };
+        #[cfg(feature = "native-vsync")]
+        let was_native = state.native.is_some();
+        #[cfg(feature = "native-vsync")]
+        match change {
+            DeliveryChange::Register if !state.native_failed => {
+                // Release XComponent's callback before creating an independent
+                // receiver. Both sources must never drive the same window.
+                match app.set_frame_input_delivery_for(self.id, FrameInputDelivery::OnDemand) {
+                    Ok(()) => match NativeFrames::new(app.refresh_rate(), self.wake.clone()) {
+                        Ok(native) => state.native = Some(native),
+                        Err(error) => {
+                            tracing::warn!(
+                                "Cannot start NativeVSync for window {}; falling back to \
+                                 XComponent callbacks: {error}",
+                                self.id
+                            );
+                            state.native_failed = true;
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(
+                            "Cannot select NativeVSync for window {}; falling back to \
+                             XComponent callbacks: {error}",
+                            self.id
+                        );
+                        state.native_failed = true;
+                    }
+                }
+            }
+            DeliveryChange::Unregister => {
+                state.native.take();
+            }
+            _ => {}
+        }
         let delivery = match change {
             DeliveryChange::Register => FrameInputDelivery::Continuous,
             DeliveryChange::Unregister => FrameInputDelivery::OnDemand,
         };
+        #[cfg(not(feature = "native-vsync"))]
         let result = app.set_frame_input_delivery_for(self.id, delivery);
+        #[cfg(feature = "native-vsync")]
+        let result =
+            if state.native.is_some() || (was_native && change == DeliveryChange::Unregister) {
+                // NativeVSync registration already disabled XComponent delivery;
+                // dropping that receiver needs no further Ability mutation.
+                Ok(())
+            } else {
+                app.set_frame_input_delivery_for(self.id, delivery)
+            };
         state.demand.complete(change, result.is_ok());
         let Err(error) = result else {
             return;
