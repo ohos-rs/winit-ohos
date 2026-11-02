@@ -1,6 +1,6 @@
 [package]
 name = "winit-ohos"
-version = "0.31.0-beta.3"
+version = "0.31.0-beta.4"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -21,9 +21,9 @@ extended-plugins = [
 ]
 
 [dependencies]
-winit-core = { version = "=0.31.0-beta.3", git = "https://github.com/richerfu/winit.git", rev = "c9ee2bff8a79aacb8068546e7150197693d35a5a" }
+winit-core = { version = "=0.31.0-beta.4", git = "https://github.com/richerfu/winit.git", rev = "2432b74a525455d56f4e11c6140d83a9f5736085" }
 tracing = { version = "0.1.40", default-features = false, features = ["log"] }
-dpi = { version = "=0.1.2", git = "https://github.com/richerfu/winit.git", rev = "c9ee2bff8a79aacb8068546e7150197693d35a5a" }
+dpi = { version = "=0.1.2", git = "https://github.com/richerfu/winit.git", rev = "2432b74a525455d56f4e11c6140d83a9f5736085" }
 rwh_06 = { package = "raw-window-handle", version = "0.6", features = ["std"] }
 
 openharmony-ability = { version = "=1.0.0-beta.3", features = [

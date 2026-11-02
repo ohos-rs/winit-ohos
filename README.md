@@ -8,18 +8,30 @@ Requires Rust 1.88 or newer and the OpenHarmony SDK. Applications use the Winit 
 native module crates also declare the Ability and N-API dependencies required by `#[ability]`.
 Keep Ability, its derive crate and plugins aligned at `=1.0.0-beta.3`.
 
+This branch targets Winit `0.31.0-beta.4` mainline at revision
+`2432b74a525455d56f4e11c6140d83a9f5736085`. The released beta.4 tag predates
+the `FetchError` and `UnknownTransfer` API changes used here.
+
+For local integration, first set the Winit checkout's workspace `winit-ohos`
+dependency to `=0.31.0-beta.4`, then use the following application dependencies.
+The Git patches make the backend and facade share the checkout's core types.
+
 ```toml
 [dependencies]
 napi-ohos = "1.2"
 napi-derive-ohos = "1.2"
 openharmony-ability = "=1.0.0-beta.3"
-winit = { git = "https://github.com/richerfu/winit.git", rev = "c9ee2bff8a79aacb8068546e7150197693d35a5a" }
+winit = { path = "/path/to/winit/winit" }
 
 [build-dependencies]
 napi-build-ohos = "1.2"
 
 [patch.crates-io]
 winit-ohos = { path = "/path/to/winit-ohos" }
+
+[patch."https://github.com/richerfu/winit.git"]
+winit-core = { path = "/path/to/winit/winit-core" }
+dpi = { path = "/path/to/winit/dpi" }
 ```
 
 ## Ability entry
@@ -81,7 +93,7 @@ and source selected by the Winit facade and the patch above:
 
 ```toml
 [target.'cfg(target_env = "ohos")'.dependencies]
-winit-ohos = { version = "=0.31.0-beta.3", features = ["native-vsync"] }
+winit-ohos = { version = "=0.31.0-beta.4", features = ["native-vsync"] }
 ```
 
 ## Platform plugins

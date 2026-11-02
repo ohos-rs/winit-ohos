@@ -104,7 +104,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 [[package]]
 name = "dpi"
 version = "0.1.2"
-source = "git+https://github.com/richerfu/winit.git?rev=c9ee2bff8a79aacb8068546e7150197693d35a5a#c9ee2bff8a79aacb8068546e7150197693d35a5a"
+source = "git+https://github.com/richerfu/winit.git?rev=2432b74a525455d56f4e11c6140d83a9f5736085#2432b74a525455d56f4e11c6140d83a9f5736085"
 
 [[package]]
 name = "fdeflate"
@@ -1165,8 +1165,8 @@ checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 
 [[package]]
 name = "winit-core"
-version = "0.31.0-beta.3"
-source = "git+https://github.com/richerfu/winit.git?rev=c9ee2bff8a79aacb8068546e7150197693d35a5a#c9ee2bff8a79aacb8068546e7150197693d35a5a"
+version = "0.31.0-beta.4"
+source = "git+https://github.com/richerfu/winit.git?rev=2432b74a525455d56f4e11c6140d83a9f5736085#2432b74a525455d56f4e11c6140d83a9f5736085"
 dependencies = [
  "bitflags 2.9.1",
  "cursor-icon",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "winit-ohos"
-version = "0.31.0-beta.3"
+version = "0.31.0-beta.4"
 dependencies = [
  "crossbeam-channel",
  "dpi",
