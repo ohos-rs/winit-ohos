@@ -24,11 +24,13 @@ use dpi::{PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
 use winit_core::application::ApplicationHandler;
 use winit_core::cursor::{Cursor, CustomCursor, CustomCursorSource};
 use winit_core::error::{
-    CreateWindowError, CustomCursorError, EventLoopError, NotSupportedError, OsError, RequestError,
+    CreateWindowError, CustomCursorError, EventLoopError, FetchError, NotSupportedError, OsError,
+    RequestError, UnknownTransfer,
 };
 use winit_core::event::{
     self, ButtonSource, DeviceId, ElementState, FingerId, Force, Ime, Modifiers, MouseButton,
-    MouseScrollDelta, PointerKind, PointerSource, StartCause, SurfaceSizeWriter, TouchPhase,
+    MouseScrollDelta, PointerKind, PointerSource, ScrollSource, StartCause, SurfaceSizeWriter,
+    TouchPhase,
 };
 use winit_core::event_loop::pump_events::PumpStatus;
 use winit_core::event_loop::register::EventLoopExtRegister;
@@ -614,6 +616,13 @@ impl EventLoop {
                             TouchPhase::Moved
                         } else {
                             touch_phase_from_arkui(event.pointer.action)
+                        },
+                        source: match event.pointer.tool_type {
+                            UIInputToolType::Mouse => ScrollSource::Wheel,
+                            UIInputToolType::Touchpad | UIInputToolType::Finger => {
+                                ScrollSource::Finger
+                            }
+                            _ => ScrollSource::Unknown,
                         },
                     },
                 );
@@ -2233,16 +2242,19 @@ impl RootActiveEventLoop for ActiveEventLoop {
             Some(SendData::Uris(uris)) => uris,
             Some(SendData::String(text)) => crate::drag_drop::parse_uris(&text),
             Some(SendData::Bytes(bytes)) => crate::drag_drop::parse_uris(
-                &String::from_utf8(bytes).map_err(|_| TransferError::Failed)?,
+                &String::from_utf8(bytes).map_err(|error| OsError::new(line!(), file!(), error))?,
             ),
-            _ => return Err(TransferError::Failed),
+            _ => {
+                return Err(TransferError::NotSupported(NotSupportedError::new(
+                    "OHOS file drags require a URI list",
+                )))
+            }
         };
         let preview = icon
             .map(|icon| {
-                let image = icon
-                    .icon
-                    .cast_ref::<winit_core::icon::RgbaIcon>()
-                    .ok_or(TransferError::Failed)?;
+                let image = icon.icon.cast_ref::<winit_core::icon::RgbaIcon>().ok_or(
+                    NotSupportedError::new("OHOS drag previews require an RGBA icon"),
+                )?;
                 let preview = openharmony_ability::DragPreview {
                     rgba: image.buffer().to_vec(),
                     width: image.width(),
@@ -2250,7 +2262,9 @@ impl RootActiveEventLoop for ActiveEventLoop {
                     hotspot_x: -(icon.offset_x as f32),
                     hotspot_y: -(icon.offset_y as f32),
                 };
-                preview.validate().map_err(|_| TransferError::Failed)?;
+                preview
+                    .validate()
+                    .map_err(|error| OsError::new(line!(), file!(), error.reason.clone()))?;
                 Ok::<_, TransferError>(preview)
             })
             .transpose()?;
@@ -2277,15 +2291,14 @@ impl RootActiveEventLoop for ActiveEventLoop {
     fn data_transfer(
         &self,
         id: winit_core::data_transfer::DataTransferId,
-    ) -> Result<Box<dyn winit_core::data_transfer::DataTransfer>, winit_core::error::TransferError>
-    {
+    ) -> Result<Box<dyn winit_core::data_transfer::DataTransfer>, UnknownTransfer> {
         self.drag_drop.lock().unwrap().data(id)
     }
     fn fetch_data_transfer(
         &self,
         id: winit_core::data_transfer::DataTransferId,
         ty: &dyn winit_core::data_transfer::TransferType,
-    ) -> Result<winit_core::event_loop::AsyncRequestSerial, winit_core::error::TransferError> {
+    ) -> Result<winit_core::event_loop::AsyncRequestSerial, FetchError> {
         let result = self.drag_drop.lock().unwrap().fetch(id, ty);
         self.main_wake.notify();
         result
@@ -2294,7 +2307,7 @@ impl RootActiveEventLoop for ActiveEventLoop {
         &self,
         id: winit_core::data_transfer::DataTransferId,
         actions: &[winit_core::event_loop::DndAction],
-    ) -> Result<(), winit_core::error::TransferError> {
+    ) -> Result<(), UnknownTransfer> {
         self.drag_drop.lock().unwrap().accept(id, actions)
     }
 

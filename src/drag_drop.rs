@@ -10,7 +10,7 @@ use std::{
 };
 use winit_core::{
     data_transfer::{DataTransfer, DataTransferId, TransferType, TypeHint, TypedData},
-    error::TransferError,
+    error::{FetchError, OsError, TransferError, UnknownTransfer},
     event::WindowEvent,
     event_loop::{AsyncRequestSerial, DndAction},
     window::WindowId,
@@ -137,23 +137,23 @@ impl DragDrop {
             DragPhase::Enter => unreachable!(),
         }
     }
-    pub fn data(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, TransferError> {
+    pub fn data(&self, id: DataTransferId) -> Result<Box<dyn DataTransfer>, UnknownTransfer> {
         self.incoming
             .get(&id)
             .map(|v| Box::new(v.files.clone()) as _)
-            .ok_or(TransferError::UnknownTransfer(id))
+            .ok_or(UnknownTransfer(id))
     }
     pub fn fetch(
         &mut self,
         id: DataTransferId,
         ty: &dyn TransferType,
-    ) -> Result<AsyncRequestSerial, TransferError> {
+    ) -> Result<AsyncRequestSerial, FetchError> {
         let incoming = self
             .incoming
             .get_mut(&id)
-            .ok_or(TransferError::UnknownTransfer(id))?;
+            .ok_or(FetchError::UnknownTransfer(id))?;
         if ty.hint() != Some(TypeHint::UriList) {
-            return Err(TransferError::Failed);
+            return Err(FetchError::TransferType);
         }
         let serial = AsyncRequestSerial::get();
         // OHOS may disclose URIs only when dropping; preserve the original request.
@@ -175,11 +175,8 @@ impl DragDrop {
         &mut self,
         id: DataTransferId,
         actions: &[DndAction],
-    ) -> Result<(), TransferError> {
-        let incoming = self
-            .incoming
-            .get_mut(&id)
-            .ok_or(TransferError::UnknownTransfer(id))?;
+    ) -> Result<(), UnknownTransfer> {
+        let incoming = self.incoming.get_mut(&id).ok_or(UnknownTransfer(id))?;
         incoming.accepted = actions.iter().find_map(|action| match action {
             DndAction::Copy => Some(openharmony_ability::DragOperation::Copy),
             DndAction::Move => Some(openharmony_ability::DragOperation::Move),
@@ -258,18 +255,35 @@ pub fn start_file_drag_with_options(
     actions: Vec<DndAction>,
     preview: Option<openharmony_ability::DragPreview>,
 ) -> Result<DataTransferId, TransferError> {
-    let scheduler = app.main_thread().map_err(|_| TransferError::Failed)?;
+    let scheduler = app
+        .main_thread()
+        .map_err(|error| OsError::new(line!(), file!(), error.reason.clone()))?;
     if uris.is_empty()
         || uris.len() > 512
         || uris.iter().any(|uri| !uri.starts_with("file://"))
         || app.native_window_for(source.into_raw() as i64).is_none()
     {
-        return Err(TransferError::Failed);
+        return Err(OsError::new(
+            line!(),
+            file!(),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "File drags require 1 to 512 file:// URIs and a live source window",
+            ),
+        )
+        .into());
     }
     let id = next_id();
     OUTGOING.with_borrow_mut(|outgoing| {
         if outgoing.is_some() {
-            return Err(TransferError::Failed);
+            return Err(TransferError::Os(OsError::new(
+                line!(),
+                file!(),
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "An OHOS file drag is already active",
+                ),
+            )));
         }
         *outgoing = Some(Outgoing {
             id,
@@ -330,9 +344,9 @@ pub fn start_file_drag_with_options(
         });
         crate::frame::main_wake(&app).notify();
     });
-    if dispatched.is_err() {
+    if let Err(error) = dispatched {
         cancel_outgoing(Some(source));
-        return Err(TransferError::Failed);
+        return Err(OsError::new(line!(), file!(), error.reason.clone()).into());
     }
     Ok(id)
 }

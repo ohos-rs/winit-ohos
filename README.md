@@ -8,18 +8,27 @@ Requires Rust 1.88 or newer and the OpenHarmony SDK. Applications use the Winit 
 native module crates also declare the Ability and N-API dependencies required by `#[ability]`.
 Keep Ability, its derive crate and plugins aligned at `=1.0.0-beta.3`.
 
+This branch targets Winit `0.31.0-beta.4` mainline at revision
+`2432b74a525455d56f4e11c6140d83a9f5736085`. The released beta.4 tag predates
+the `FetchError` and `UnknownTransfer` API changes used here.
+
+Use the pinned Git dependencies below. The core patches make the facade and
+backend share one `winit-core` and `dpi` source.
+
 ```toml
 [dependencies]
+log = "0.4"
 napi-ohos = "1.2"
 napi-derive-ohos = "1.2"
 openharmony-ability = "=1.0.0-beta.3"
-winit = { git = "https://github.com/richerfu/winit.git", rev = "c9ee2bff8a79aacb8068546e7150197693d35a5a" }
+winit = { git = "https://github.com/richerfu/winit.git", rev = "44a877861d9e8327e0df6499cab45f4e8acf4804" }
 
 [build-dependencies]
 napi-build-ohos = "1.2"
 
-[patch.crates-io]
-winit-ohos = { path = "/path/to/winit-ohos" }
+[patch."https://github.com/richerfu/winit.git"]
+winit-core = { git = "https://github.com/rust-windowing/winit.git", rev = "e1ad70bfed1936fb615d602ade72a617cb9bff4a" }
+dpi = { git = "https://github.com/rust-windowing/winit.git", rev = "e1ad70bfed1936fb615d602ade72a617cb9bff4a" }
 ```
 
 ## Ability entry
@@ -76,12 +85,12 @@ the previous native window handle is no longer valid.
   Application callbacks stay on the Ability UI thread; frame delivery stops when idle or hidden.
 - `extended-plugins`: add menus, notifications, process control, system state and accessibility.
 
-To enable a backend feature, add a direct dependency that resolves to the same package
-and source selected by the Winit facade and the patch above:
+To enable a backend feature, add a direct dependency at the same Git revision
+selected by the Winit facade:
 
 ```toml
 [target.'cfg(target_env = "ohos")'.dependencies]
-winit-ohos = { version = "=0.31.0-beta.3", features = ["native-vsync"] }
+winit-ohos = { git = "https://github.com/ohos-rs/winit-ohos.git", rev = "b3eecb1f41e1c03e9546ccd173cb357e96337fe7", features = ["native-vsync"] }
 ```
 
 ## Platform plugins
